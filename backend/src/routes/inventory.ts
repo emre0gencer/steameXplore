@@ -1,11 +1,12 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 
 const router = Router();
 
 const DEFAULT_CONTEXT_ID = '2';
-const DEFAULT_COUNT = '5000';
+const DEFAULT_COUNT = '2000';
 const MAX_RETRY_SECONDS = 15;
+const MAX_COUNT = 5000;
 
 type SteamInventoryPayload = {
   assets?: {
@@ -102,20 +103,26 @@ async function fetchInventoryPage(url: string, steamid: string): Promise<Respons
   return response;
 }
 
-async function parseSteamResponse(response: Response): Promise<SteamInventoryPayload> {
-  const body = await response.text();
+async function parseSteamResponse(
+  response: Response
+): Promise<{ data?: SteamInventoryPayload; rawBody: string }> {
+  const rawBody = await response.text();
 
   try {
-    return JSON.parse(body) as SteamInventoryPayload;
+    return { data: JSON.parse(rawBody) as SteamInventoryPayload, rawBody };
   } catch {
-    throw new Error(
-      `Steam returned non-JSON response: HTTP ${response.status} ${response.statusText}`
-    );
+    return { rawBody };
   }
 }
 
 function steamFailureMessage(response: Response, data?: SteamInventoryPayload): string {
   const steamMessage = data?.error ?? data?.Error;
+
+  if (response.status === 400) {
+    return steamMessage
+      ? `Steam rejected the inventory request: ${steamMessage}`
+      : 'Steam rejected the inventory request. Check that the SteamID64, appid, contextid, and count are valid for this inventory.';
+  }
 
   if (response.status === 403) {
     return steamMessage
@@ -144,19 +151,13 @@ async function fetchFullInventory(
   do {
     const url = buildInventoryUrl(steamid, appid, contextid, count, startAssetId);
     const response = await fetchInventoryPage(url, steamid);
-    let data: SteamInventoryPayload | undefined;
+    const { data, rawBody } = await parseSteamResponse(response);
 
-    try {
-      data = await parseSteamResponse(response);
-    } catch (err) {
-      if (!response.ok) {
-        throw new Error(steamFailureMessage(response));
-      }
-      throw err;
-    }
-
-    if (!response.ok || data.success === false || data.success === 0) {
-      throw new Error(steamFailureMessage(response, data));
+    if (!response.ok || !data || data.success === false || data.success === 0) {
+      const rawSnippet = rawBody.slice(0, 250);
+      throw new Error(
+        `${steamFailureMessage(response, data)}${rawSnippet ? ` Raw Steam response: ${rawSnippet}` : ''}`
+      );
     }
 
     if (!firstPage) {
@@ -181,27 +182,45 @@ function getQueryValue(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
+function getCount(value: unknown): string {
+  const rawCount = getQueryValue(value, DEFAULT_COUNT);
+  const parsed = Number(rawCount);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_COUNT;
+  }
+
+  return String(Math.min(Math.floor(parsed), MAX_COUNT));
+}
+
 async function handleInventoryRequest(
-  req: Parameters<Parameters<typeof router.get>[1]>[0],
-  res: Parameters<Parameters<typeof router.get>[1]>[1],
+  req: Request,
+  res: Response,
   steamid: string,
   appid: string
 ) {
   const contextid = getQueryValue(req.query.contextid, DEFAULT_CONTEXT_ID);
-  const count = getQueryValue(req.query.count, DEFAULT_COUNT);
+  const count = getCount(req.query.count);
 
   try {
     const data = await fetchFullInventory(steamid, appid, contextid, count);
     return res.json(data);
   } catch (err) {
     const message = (err as Error).message;
-    const status = message.includes('throttling') ? 429 : message.includes('denied') ? 403 : 502;
+    const status = message.includes('throttling')
+      ? 429
+      : message.includes('denied')
+        ? 403
+        : message.includes('rejected')
+          ? 400
+          : 502;
 
     return res.status(status).json({
       error: message,
       steamid,
       appid,
       contextid,
+      count,
     });
   }
 }
