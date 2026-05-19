@@ -1,13 +1,12 @@
-import { Routes, Route } from 'react-router-dom';
-import Login from './pages/Login';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Inventory from './pages/Inventory';
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Login />} />
-      <Route path="/dashboard" element={<Dashboard />} />
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/dashboard" element={<Navigate to="/" replace />} />
       <Route path="/inventory" element={<Inventory />} />
     </Routes>
   );

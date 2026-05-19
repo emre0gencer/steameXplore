@@ -1,11 +1,14 @@
-import { Router, type Request, type Response } from 'express';
+import { Router, type Request, type Response as ExpressResponse } from 'express';
+
+type FetchResponse = globalThis.Response;
 import { requireAuth } from '../middleware/requireAuth';
+import { withCache, TTL } from '../services/cache';
 
 const router = Router();
 
 const DEFAULT_CONTEXT_ID = '2';
 const DEFAULT_COUNT = '2000';
-const MAX_RETRY_SECONDS = 15;
+const MAX_RETRY_SECONDS = 30;
 const MAX_COUNT = 5000;
 
 type SteamInventoryPayload = {
@@ -79,7 +82,7 @@ function buildInventoryUrl(
 
 // Steam throttles inventory endpoints aggressively and sometimes returns 403/HTML to
 // non-browser-looking requests even when an inventory is public in the browser.
-async function fetchInventoryPage(url: string, steamid: string): Promise<Response> {
+async function fetchInventoryPage(url: string, steamid: string): Promise<FetchResponse> {
   const fetchOptions: RequestInit = {
     headers: {
       Accept: 'application/json,text/plain,*/*',
@@ -104,7 +107,7 @@ async function fetchInventoryPage(url: string, steamid: string): Promise<Respons
 }
 
 async function parseSteamResponse(
-  response: Response
+  response: FetchResponse
 ): Promise<{ data?: SteamInventoryPayload; rawBody: string }> {
   const rawBody = await response.text();
 
@@ -115,7 +118,7 @@ async function parseSteamResponse(
   }
 }
 
-function steamFailureMessage(response: Response, data?: SteamInventoryPayload): string {
+function steamFailureMessage(response: FetchResponse, data?: SteamInventoryPayload): string {
   const steamMessage = data?.error ?? data?.Error;
 
   if (response.status === 400) {
@@ -195,7 +198,7 @@ function getCount(value: unknown): string {
 
 async function handleInventoryRequest(
   req: Request,
-  res: Response,
+  res: ExpressResponse,
   steamid: string,
   appid: string
 ) {
@@ -203,7 +206,11 @@ async function handleInventoryRequest(
   const count = getCount(req.query.count);
 
   try {
-    const data = await fetchFullInventory(steamid, appid, contextid, count);
+    const data = await withCache(
+      `inventory:${steamid}:${appid}:${contextid}`,
+      TTL.SHORT,
+      () => fetchFullInventory(steamid, appid, contextid, count)
+    );
     return res.json(data);
   } catch (err) {
     const message = (err as Error).message;

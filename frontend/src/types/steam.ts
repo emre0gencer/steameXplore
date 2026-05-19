@@ -33,6 +33,7 @@ export interface InventoryDescription {
   instanceid: string;
   name: string;
   market_name: string;
+  market_hash_name: string;
   icon_url: string;
   icon_url_large: string;
   name_color: string;
@@ -40,6 +41,11 @@ export interface InventoryDescription {
   type: string;
   tradable: number;
   marketable: number;
+  commodity: number;
+  market_tradable_restriction?: number;
+  descriptions?: { type: string; value: string; color?: string }[];
+  actions?: { link: string; name: string }[];
+  fraudwarnings?: string[];
   tags: {
     category: string;
     internal_name: string;

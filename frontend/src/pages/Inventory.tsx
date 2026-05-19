@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getMe, getGames, getInventory, logout } from '../api/steamApi';
+import { getMe, getInventory, logout, getSteamPrice, getSkinportPrices } from '../api/steamApi';
+import type { SkinportPriceResult, SteamPriceResult } from '../api/steamApi';
 import type { SteamUser, InventoryDescription } from '../types/steam';
 
 const TARGET_GAMES = [
@@ -13,20 +14,29 @@ const TARGET_GAMES = [
 interface InventoryItem {
   classid: string;
   instanceid: string;
+  appid: number;
   name: string;
   market_name: string;
+  market_hash_name: string;
   icon_url: string;
+  icon_url_large: string;
   name_color: string;
+  background_color: string;
   type: string;
   tradable: number;
   marketable: number;
+  commodity: number;
+  market_tradable_restriction?: number;
+  descriptions: { type: string; value: string; color?: string }[];
+  actions: { link: string; name: string }[];
+  fraudwarnings: string[];
+  tags: { category: string; internal_name: string; localized_category_name: string; localized_tag_name: string; color?: string }[];
   quantity: number;
 }
 
 interface GameInventory {
   appid: number;
   name: string;
-  img_icon_url: string;
   items: InventoryItem[];
   loading: boolean;
   error: string | null;
@@ -70,20 +80,30 @@ function buildItems(data: { assets: { classid: string; instanceid: string }[]; d
     items.push({
       classid: asset.classid,
       instanceid: asset.instanceid,
+      appid: desc.appid,
       name: desc.name,
       market_name: desc.market_name,
+      market_hash_name: desc.market_hash_name ?? desc.market_name,
       icon_url: desc.icon_url,
+      icon_url_large: desc.icon_url_large ?? desc.icon_url,
       name_color: desc.name_color ?? '',
+      background_color: desc.background_color ?? '',
       type: desc.type ?? '',
       tradable: desc.tradable,
       marketable: desc.marketable,
+      commodity: desc.commodity ?? 0,
+      market_tradable_restriction: desc.market_tradable_restriction,
+      descriptions: desc.descriptions ?? [],
+      actions: desc.actions ?? [],
+      fraudwarnings: desc.fraudwarnings ?? [],
+      tags: desc.tags ?? [],
       quantity: quantityMap.get(key) ?? 1,
     });
   }
   return items;
 }
 
-function ItemSquare({ item }: { item: InventoryItem }) {
+function ItemSquare({ item, onClick }: { item: InventoryItem; onClick: () => void }) {
   const [hovered, setHovered] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const [tooltipLeft, setTooltipLeft] = useState(true);
@@ -102,6 +122,7 @@ function ItemSquare({ item }: { item: InventoryItem }) {
   return (
     <div
       ref={ref}
+      onClick={onClick}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -154,7 +175,6 @@ function ItemSquare({ item }: { item: InventoryItem }) {
           boxShadow: '0 4px 20px rgba(0,0,0,0.7)',
           minWidth: '160px',
           maxWidth: '280px',
-          whiteSpaceCollapse: 'preserve',
         }}>
           <div style={{ color: rarityColor, fontWeight: 600, lineHeight: 1.3, wordBreak: 'break-word', whiteSpace: 'normal' }}>
             {item.name}
@@ -162,16 +182,243 @@ function ItemSquare({ item }: { item: InventoryItem }) {
           {item.type && (
             <div style={{ color: C.muted, fontSize: '11px', marginTop: '4px' }}>{item.type}</div>
           )}
-          <div style={{ marginTop: '6px', display: 'flex', gap: '8px' }}>
-            {item.tradable === 1 && (
-              <span style={{ color: '#5ba32b', fontSize: '11px' }}>Tradable</span>
-            )}
-            {item.marketable === 1 && (
-              <span style={{ color: '#5ba32b', fontSize: '11px' }}>Marketable</span>
-            )}
-          </div>
+          <div style={{ marginTop: '4px', fontSize: '11px', color: C.muted, fontStyle: 'italic' }}>Click for details</div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ItemModal({ item, onClose }: { item: InventoryItem; onClose: () => void }) {
+  const rarityColor = item.name_color ? `#${item.name_color}` : C.accent;
+  const bgColor = item.background_color ? `#${item.background_color}` : '#1e2d3d';
+  const iconUrl = `https://steamcommunity-a.akamaihd.net/economy/image/${item.icon_url_large || item.icon_url}/256fx256f`;
+  const marketUrl = `https://steamcommunity.com/market/listings/${item.appid}/${encodeURIComponent(item.market_hash_name)}`;
+
+  const [steamPrice, setSteamPrice] = useState<SteamPriceResult | null | undefined>(undefined);
+  const [skinportPrice, setSkinportPrice] = useState<SkinportPriceResult | null | undefined>(undefined);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (item.marketable !== 1) return;
+    getSteamPrice(item.appid, item.market_hash_name)
+      .then((data) => setSteamPrice(data))
+      .catch(() => setSteamPrice(null));
+    if (item.appid === 730) {
+      getSkinportPrices([item.market_hash_name])
+        .then((map) => setSkinportPrice(map[item.market_hash_name] ?? null))
+        .catch(() => setSkinportPrice(null));
+    }
+  }, [item.appid, item.market_hash_name, item.marketable]);
+
+  const descLines = item.descriptions.filter((d) => d.value && d.value.trim() && d.value !== ' ');
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.75)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '20px',
+        backdropFilter: 'blur(2px)',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: C.card,
+          border: `1px solid ${rarityColor}`,
+          borderRadius: '6px',
+          width: '100%',
+          maxWidth: '540px',
+          maxHeight: '90vh',
+          overflowY: 'auto',
+          boxShadow: `0 8px 40px rgba(0,0,0,0.8), 0 0 0 1px ${rarityColor}22`,
+          fontFamily: '"Motiva Sans", Arial, sans-serif',
+        }}
+      >
+        {/* Header: image + name */}
+        <div style={{
+          display: 'flex', gap: '20px', alignItems: 'flex-start',
+          padding: '24px 24px 20px',
+          borderBottom: `1px solid ${C.border}`,
+          background: bgColor !== '#1e2d3d' ? `${bgColor}22` : undefined,
+        }}>
+          <div style={{
+            width: '128px', height: '128px', flexShrink: 0,
+            background: bgColor, borderRadius: '4px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: `1px solid ${C.border}`,
+          }}>
+            <img src={iconUrl} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: '3px' }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ color: rarityColor, fontSize: '18px', fontWeight: 700, lineHeight: 1.3, wordBreak: 'break-word', marginBottom: '6px' }}>
+              {item.name}
+            </div>
+            {item.marketable === 1 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '8px', fontSize: '14px', fontWeight: 600 }}>
+                <span style={{ color: '#66c0f4' }}>
+                  Steam:{' '}
+                  {steamPrice === undefined
+                    ? <span style={{ opacity: 0.5, fontWeight: 400, fontSize: '12px' }}>loading…</span>
+                    : steamPrice?.lowest_price
+                      ? steamPrice.lowest_price
+                      : <span style={{ opacity: 0.5, fontWeight: 400, fontSize: '12px' }}>N/A</span>
+                  }
+                </span>
+                {item.appid === 730 && (
+                  <span style={{ color: '#7ddc7d' }}>
+                    Skinport:{' '}
+                    {skinportPrice === undefined
+                      ? <span style={{ opacity: 0.5, fontWeight: 400, fontSize: '12px' }}>loading…</span>
+                      : skinportPrice?.min_price != null
+                        ? `$${skinportPrice.min_price.toFixed(2)}`
+                        : <span style={{ opacity: 0.5, fontWeight: 400, fontSize: '12px' }}>N/A</span>
+                    }
+                  </span>
+                )}
+              </div>
+            )}
+            {item.type && (
+              <div style={{ color: C.muted, fontSize: '13px', marginBottom: '8px' }}>{item.type}</div>
+            )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
+              <Badge color={item.tradable === 1 ? '#5ba32b' : '#888'} label={item.tradable === 1 ? 'Tradable' : 'Not Tradable'} />
+              <Badge color={item.marketable === 1 ? '#5ba32b' : '#888'} label={item.marketable === 1 ? 'Marketable' : 'Not Marketable'} />
+              {item.quantity > 1 && <Badge color={C.accent} label={`×${item.quantity} in inventory`} />}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{ background: 'none', border: 'none', color: C.muted, cursor: 'pointer', fontSize: '20px', lineHeight: 1, padding: '0 0 4px', flexShrink: 0, alignSelf: 'flex-start' }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+          {/* Fraud warnings */}
+          {item.fraudwarnings.length > 0 && (
+            <div style={{ background: '#4a1818', border: '1px solid #c0392b', borderRadius: '4px', padding: '10px 14px' }}>
+              {item.fraudwarnings.map((w, i) => (
+                <div key={i} style={{ color: '#e74c3c', fontSize: '13px' }}>{w}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Description lines */}
+          {descLines.length > 0 && (
+            <div style={{ background: C.surface, borderRadius: '4px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {descLines.map((d, i) => (
+                <div
+                  key={i}
+                  style={{ fontSize: '13px', color: d.color ? `#${d.color}` : C.text, lineHeight: 1.5 }}
+                  dangerouslySetInnerHTML={{ __html: d.value.replace(/\n/g, '<br/>') }}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Tags */}
+          {item.tags.length > 0 && (
+            <div>
+              <div style={{ fontSize: '11px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '8px' }}>Properties</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                {item.tags.map((tag, i) => (
+                  <div key={i} style={{ background: C.surface, borderRadius: '3px', padding: '6px 10px' }}>
+                    <div style={{ fontSize: '10px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>
+                      {tag.localized_category_name}
+                    </div>
+                    <div style={{ fontSize: '13px', color: tag.color ? `#${tag.color}` : C.text }}>
+                      {tag.localized_tag_name}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Market trade restriction */}
+          {item.market_tradable_restriction != null && item.market_tradable_restriction > 0 && (
+            <div style={{ fontSize: '12px', color: C.muted }}>
+              Trade hold: {item.market_tradable_restriction} day{item.market_tradable_restriction !== 1 ? 's' : ''}
+            </div>
+          )}
+
+          {/* Meta info */}
+          <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <MetaRow label="Market name" value={item.market_hash_name} />
+            <MetaRow label="Class ID" value={item.classid} />
+            <MetaRow label="Instance ID" value={item.instanceid} />
+          </div>
+
+          {/* Actions */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {item.marketable === 1 && (
+              <a
+                href={marketUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  background: '#4c7a2e', color: '#fff', padding: '8px 16px',
+                  borderRadius: '3px', fontSize: '13px', textDecoration: 'none',
+                  fontWeight: 600, letterSpacing: '0.3px',
+                }}
+              >
+                View on Steam Market
+              </a>
+            )}
+            {item.actions.map((action, i) => {
+              const link = action.link.replace('%assetid%', item.classid).replace('%owner_steamid%', '');
+              return (
+                <a
+                  key={i}
+                  href={link}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    background: C.surface, color: C.accent, padding: '8px 16px',
+                    borderRadius: '3px', fontSize: '13px', textDecoration: 'none',
+                    border: `1px solid ${C.border}`,
+                  }}
+                >
+                  {action.name}
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Badge({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{
+      background: `${color}22`, border: `1px solid ${color}66`,
+      color, borderRadius: '3px', padding: '2px 8px', fontSize: '11px', fontWeight: 600,
+    }}>
+      {label}
+    </span>
+  );
+}
+
+function MetaRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', gap: '8px', fontSize: '12px' }}>
+      <span style={{ color: C.muted, minWidth: '100px', flexShrink: 0 }}>{label}</span>
+      <span style={{ color: C.text, wordBreak: 'break-all' }}>{value}</span>
     </div>
   );
 }
@@ -179,9 +426,8 @@ function ItemSquare({ item }: { item: InventoryItem }) {
 export default function Inventory() {
   const [user, setUser] = useState<SteamUser | null>(null);
   const [gameInventories, setGameInventories] = useState<GameInventory[]>([]);
-  const [selectedAppid, setSelectedAppid] = useState<number | null>(null);
-  const [loadingGames, setLoadingGames] = useState(true);
-  const [gamesError, setGamesError] = useState<string | null>(null);
+  const [selectedAppid, setSelectedAppid] = useState<number>(TARGET_GAMES[0].appid);
+  const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -196,54 +442,34 @@ export default function Inventory() {
   }, [navigate]);
 
   async function loadInventories() {
-    setLoadingGames(true);
-    setGamesError(null);
-    try {
-      const gamesData = await getGames();
-      const ownedSet = new Set((gamesData.games ?? []).map((g) => g.appid));
-      const ownedGames = (gamesData.games ?? []);
+    const initial: GameInventory[] = TARGET_GAMES.map((tg) => ({
+      appid: tg.appid,
+      name: tg.name,
+      items: [],
+      loading: true,
+      error: null,
+    }));
+    setGameInventories(initial);
 
-      const ownedTargets: GameInventory[] = TARGET_GAMES
-        .filter((tg) => ownedSet.has(tg.appid))
-        .map((tg) => {
-          const owned = ownedGames.find((g) => g.appid === tg.appid);
-          return {
-            appid: tg.appid,
-            name: tg.name,
-            img_icon_url: owned?.img_icon_url ?? '',
-            items: [],
-            loading: true,
-            error: null,
-          };
-        });
-
-      setGameInventories(ownedTargets);
-      if (ownedTargets.length > 0) setSelectedAppid(ownedTargets[0].appid);
-      setLoadingGames(false);
-
-      await Promise.all(
-        ownedTargets.map(async (game) => {
-          try {
-            const data = await getInventory(game.appid);
-            const items = buildItems(data);
-            setGameInventories((prev) =>
-              prev.map((g) => g.appid === game.appid ? { ...g, items, loading: false } : g)
-            );
-          } catch (err) {
-            setGameInventories((prev) =>
-              prev.map((g) =>
-                g.appid === game.appid
-                  ? { ...g, loading: false, error: (err as Error).message }
-                  : g
-              )
-            );
-          }
-        })
-      );
-    } catch (err) {
-      setLoadingGames(false);
-      setGamesError((err as Error).message);
-    }
+    await Promise.all(
+      initial.map(async (game) => {
+        try {
+          const data = await getInventory(game.appid);
+          const items = buildItems(data);
+          setGameInventories((prev) =>
+            prev.map((g) => g.appid === game.appid ? { ...g, items, loading: false } : g)
+          );
+        } catch (err) {
+          setGameInventories((prev) =>
+            prev.map((g) =>
+              g.appid === game.appid
+                ? { ...g, loading: false, error: (err as Error).message }
+                : g
+            )
+          );
+        }
+      })
+    );
   }
 
   const handleLogout = async () => {
@@ -288,22 +514,6 @@ export default function Inventory() {
           Inventory
         </h1>
 
-        {loadingGames && (
-          <div style={{ color: C.muted, fontSize: '14px' }}>Checking your library...</div>
-        )}
-
-        {gamesError && (
-          <div style={{ color: '#e74c3c', background: C.card, padding: '12px 16px', borderRadius: '4px', fontSize: '14px' }}>
-            Failed to load games: {gamesError}
-          </div>
-        )}
-
-        {!loadingGames && !gamesError && gameInventories.length === 0 && (
-          <div style={{ color: C.muted, fontSize: '14px' }}>
-            None of the supported games (CS2, Dota 2, TF2, Rust) were found in your library.
-          </div>
-        )}
-
         {gameInventories.length > 0 && (
           <>
             {/* Game tabs */}
@@ -333,14 +543,6 @@ export default function Inventory() {
                       marginBottom: '-2px',
                     }}
                   >
-                    {game.img_icon_url && (
-                      <img
-                        src={`https://media.steampowered.com/steamcommunity/public/images/apps/${game.appid}/${game.img_icon_url}.jpg`}
-                        alt=""
-                        style={{ width: '20px', height: '20px', borderRadius: '2px', flexShrink: 0 }}
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                      />
-                    )}
                     <span style={{ fontWeight: isActive ? 600 : 400 }}>{game.name}</span>
                     {game.loading ? (
                       <span style={{ fontSize: '11px', color: C.muted, fontStyle: 'italic' }}>loading…</span>
@@ -380,7 +582,7 @@ export default function Inventory() {
               {selectedGame && !selectedGame.loading && !selectedGame.error && selectedGame.items.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                   {selectedGame.items.map((item) => (
-                    <ItemSquare key={`${item.classid}_${item.instanceid}`} item={item} />
+                    <ItemSquare key={`${item.classid}_${item.instanceid}`} item={item} onClick={() => setSelectedItem(item)} />
                   ))}
                 </div>
               )}
@@ -388,6 +590,7 @@ export default function Inventory() {
           </>
         )}
       </div>
+      {selectedItem && <ItemModal item={selectedItem} onClose={() => setSelectedItem(null)} />}
     </div>
   );
 }

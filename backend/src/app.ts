@@ -14,6 +14,7 @@ import groupsRouter from './routes/groups';
 import levelRouter from './routes/level';
 import inventoryRouter from './routes/inventory';
 import schemaRouter from './routes/schema';
+import priceRouter from './routes/price';
 
 const app = express();
 
@@ -35,5 +36,6 @@ app.use('/api/groups', groupsRouter);
 app.use('/api/level', levelRouter);
 app.use('/api/inventory', inventoryRouter);
 app.use('/api/schema', schemaRouter);
+app.use('/api/price', priceRouter);
 
 export default app;
