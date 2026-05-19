@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { steamFetch } from '../services/steamApi';
+import { withCache, TTL } from '../services/cache';
 
 const router = Router();
 
@@ -8,17 +9,21 @@ const router = Router();
 router.get('/', requireAuth, async (req, res) => {
   const { steamid } = req.session.user!;
   try {
-    const data = await steamFetch<{
-      players: {
-        SteamId: string;
-        CommunityBanned: boolean;
-        VACBanned: boolean;
-        NumberOfVACBans: number;
-        DaysSinceLastBan: number;
-        NumberOfGameBans: number;
-        EconomyBan: string; // 'none' | 'probation' | 'banned'
-      }[];
-    }>('/ISteamUser/GetPlayerBans/v1', { steamids: steamid });
+    const data = await withCache(
+      `${steamid}:bans`,
+      TTL.LONG,
+      () => steamFetch<{
+        players: {
+          SteamId: string;
+          CommunityBanned: boolean;
+          VACBanned: boolean;
+          NumberOfVACBans: number;
+          DaysSinceLastBan: number;
+          NumberOfGameBans: number;
+          EconomyBan: string; // 'none' | 'probation' | 'banned'
+        }[];
+      }>('/ISteamUser/GetPlayerBans/v1', { steamids: steamid })
+    );
     res.json(data.players[0] ?? null);
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });

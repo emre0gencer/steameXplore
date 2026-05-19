@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { steamFetch } from '../services/steamApi';
+import { withCache, TTL } from '../services/cache';
 
 const router = Router();
 
@@ -8,12 +9,16 @@ const router = Router();
 router.get('/', requireAuth, async (req, res) => {
   const { steamid } = req.session.user!;
   try {
-    const data = await steamFetch<{
-      response: {
-        success: boolean;
-        groups: { gid: string }[];
-      };
-    }>('/ISteamUser/GetUserGroupList/v1', { steamid });
+    const data = await withCache(
+      `${steamid}:groups`,
+      TTL.MEDIUM,
+      () => steamFetch<{
+        response: {
+          success: boolean;
+          groups: { gid: string }[];
+        };
+      }>('/ISteamUser/GetUserGroupList/v1', { steamid })
+    );
     res.json(data.response);
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });

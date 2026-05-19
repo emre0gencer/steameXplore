@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { steamFetch } from '../services/steamApi';
+import { withCache, TTL } from '../services/cache';
 
 const router = Router();
 
@@ -8,15 +9,19 @@ const router = Router();
 router.get('/', requireAuth, async (req, res) => {
   const { steamid } = req.session.user!;
   try {
-    const data = await steamFetch<{
-      friendslist: {
-        friends: {
-          steamid: string;
-          relationship: string;
-          friend_since: number;
-        }[];
-      };
-    }>('/ISteamUser/GetFriendList/v1', { steamid, relationship: 'friend' });
+    const data = await withCache(
+      `${steamid}:friends`,
+      TTL.MEDIUM,
+      () => steamFetch<{
+        friendslist: {
+          friends: {
+            steamid: string;
+            relationship: string;
+            friend_since: number;
+          }[];
+        };
+      }>('/ISteamUser/GetFriendList/v1', { steamid, relationship: 'friend' })
+    );
     res.json(data.friendslist);
   } catch (err) {
     // Friends list returns 401 from Steam when set to private

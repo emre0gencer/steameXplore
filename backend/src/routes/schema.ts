@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { steamFetch } from '../services/steamApi';
+import { withCache, TTL } from '../services/cache';
 
 const router = Router();
 
@@ -84,16 +85,13 @@ router.get('/:appid', requireAuth, async (req, res) => {
   }
 
   try {
-    if (appid === '440') {
-      // TF2: return the full inline schema
-      const data = await getTF2Schema();
-      res.json(data.result);
-    } else {
-      // CS2, Dota 2, Rust, etc.: return the schema URL
-      // Callers can fetch the items_game_url themselves for the full VDF schema
-      const data = await getSchemaUrl(appid);
-      res.json(data.result);
-    }
+    // Schema is keyed by appid only — not per-user, same data for everyone
+    const data = await withCache(
+      `schema:${appid}`,
+      TTL.LONG,
+      () => appid === '440' ? getTF2Schema().then((d) => d.result) : getSchemaUrl(appid).then((d) => d.result)
+    );
+    res.json(data);
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });
   }
