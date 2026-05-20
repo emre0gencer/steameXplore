@@ -496,6 +496,7 @@ export default function Inventory() {
         </span>
         <NavLink label="Dashboard" onClick={() => navigate('/dashboard')} active={false} />
         <NavLink label="Inventory" onClick={() => {}} active={true} />
+        <NavLink label="Search Users" onClick={() => navigate('/search')} active={false} />
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <img src={user.avatar.small} alt="" style={{ width: '28px', height: '28px', borderRadius: '3px' }} />

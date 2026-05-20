@@ -162,6 +162,7 @@ export default function Dashboard() {
         <span style={{ color: C.accent, fontWeight: 700, fontSize: '17px', marginRight: '16px', letterSpacing: '0.5px' }}>steameXplore</span>
         <NavLink label="Dashboard" onClick={() => {}} active={true} />
         <NavLink label="Inventory" onClick={() => navigate('/inventory')} active={false} />
+        <NavLink label="Search Users" onClick={() => navigate('/search')} active={false} />
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           {authenticated && user ? (

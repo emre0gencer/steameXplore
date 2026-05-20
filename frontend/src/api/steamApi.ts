@@ -95,6 +95,28 @@ export interface SkinportPriceResult {
   quantity: number;
 }
 
+export interface PlayerSearchResult {
+  steamid: string;
+  personaname: string;
+  profileurl: string;
+  avatar: string;
+  avatarmedium: string;
+  avatarfull: string;
+  personastate: number;
+  communityvisibilitystate: number;
+  realname?: string;
+  gameid?: string;
+  gameextrainfo?: string;
+  loccountrycode?: string;
+}
+
+export async function searchUser(q: string): Promise<PlayerSearchResult[]> {
+  const qs = new URLSearchParams({ q });
+  const res = await fetch(`${BASE}/api/search?${qs}`, { credentials: 'include' });
+  if (!res.ok) return [];
+  return res.json();
+}
+
 // Fetches Skinport prices for a batch of CS2 items in a single request.
 // Returns a map of market_hash_name → price data.
 export async function getSkinportPrices(
