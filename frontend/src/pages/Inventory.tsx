@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getMe, getInventory, logout, getSteamPrice, getSkinportPrices } from '../api/steamApi';
+import { getMe, getInventory, getPublicInventory, logout, getSteamPrice, getSkinportPrices } from '../api/steamApi';
 import type { SkinportPriceResult, SteamPriceResult } from '../api/steamApi';
 import type { SteamUser, InventoryDescription } from '../types/steam';
 
@@ -423,23 +423,72 @@ function MetaRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-export default function Inventory() {
+// ── Rarity sorting ─────────────────────────────────────────────────────────────
+
+const RARITY_RANK: Record<string, number> = {
+  'e4ae39': 0, // CS2 Contraband
+  'eb4b4b': 1, // CS2 Covert
+  'd32ce6': 2, // CS2 Classified
+  '8847ff': 3, // CS2 Restricted
+  '4b69ff': 4, // CS2 Mil-Spec
+  '5e98d9': 5, // CS2 Industrial
+  'b0c3d9': 6, // CS2 Consumer
+  'ffd700': 0, // TF2 Unusual
+  'aa0000': 1, // TF2 Collector's
+  '8650ac': 3, // TF2 Community
+  'e29b00': 1, // Dota Immortal
+  'aaaa00': 2, // Dota Ancient
+};
+
+function itemRarityRank(item: InventoryItem): number {
+  const rarityTag = item.tags.find(t => t.category === 'Rarity');
+  const colorKey = (rarityTag?.color || item.name_color || '').toLowerCase().replace(/^#/, '');
+  return RARITY_RANK[colorKey] ?? 999;
+}
+
+function sortByRarity(items: InventoryItem[]): InventoryItem[] {
+  return [...items].sort((a, b) => {
+    const diff = itemRarityRank(a) - itemRarityRank(b);
+    return diff !== 0 ? diff : a.name.localeCompare(b.name);
+  });
+}
+
+function getTagValue(item: InventoryItem, category: string): string {
+  return item.tags.find(t => t.category === category)?.localized_tag_name ?? '';
+}
+
+// ── Inventory page ──────────────────────────────────────────────────────────────
+
+export default function Inventory({ targetSteamId }: { targetSteamId?: string } = {}) {
+  const isOwnProfile = !targetSteamId;
   const [user, setUser] = useState<SteamUser | null>(null);
   const [gameInventories, setGameInventories] = useState<GameInventory[]>([]);
   const [selectedAppid, setSelectedAppid] = useState<number>(TARGET_GAMES[0].appid);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  const [filterType, setFilterType] = useState('All');
+  const [filterRarity, setFilterRarity] = useState('All');
+  const [filterExterior, setFilterExterior] = useState('All');
+  const [filterQuality, setFilterQuality] = useState('All');
   const navigate = useNavigate();
 
   useEffect(() => {
     getMe().then(({ authenticated, user: u }) => {
-      if (!authenticated) {
+      if (isOwnProfile && !authenticated) {
         navigate('/');
-      } else {
-        setUser(u);
-        loadInventories();
+        return;
       }
+      if (u) setUser(u);
+      loadInventories();
     });
-  }, [navigate]);
+  }, [navigate, targetSteamId]);
+
+  // Reset CS2 filters when switching tabs
+  useEffect(() => {
+    setFilterType('All');
+    setFilterRarity('All');
+    setFilterExterior('All');
+    setFilterQuality('All');
+  }, [selectedAppid]);
 
   async function loadInventories() {
     const initial: GameInventory[] = TARGET_GAMES.map((tg) => ({
@@ -454,7 +503,9 @@ export default function Inventory() {
     await Promise.all(
       initial.map(async (game) => {
         try {
-          const data = await getInventory(game.appid);
+          const data = isOwnProfile
+            ? await getInventory(game.appid)
+            : await getPublicInventory(targetSteamId!, game.appid);
           const items = buildItems(data);
           setGameInventories((prev) =>
             prev.map((g) => g.appid === game.appid ? { ...g, items, loading: false } : g)
@@ -478,8 +529,24 @@ export default function Inventory() {
   };
 
   const selectedGame = gameInventories.find((g) => g.appid === selectedAppid);
+  const sortedItems = selectedGame ? sortByRarity(selectedGame.items) : [];
 
-  if (!user) {
+  // CS2 filter options (dynamic from loaded items)
+  const cs2Items = selectedAppid === 730 ? sortedItems : [];
+  const typeOptions = ['All', ...Array.from(new Set(cs2Items.map(i => getTagValue(i, 'Type')).filter(Boolean))).sort()];
+  const rarityOptions = ['All', ...Array.from(new Set(cs2Items.map(i => getTagValue(i, 'Rarity')).filter(Boolean))).sort()];
+  const exteriorOptions = ['All', ...Array.from(new Set(cs2Items.map(i => getTagValue(i, 'Exterior')).filter(Boolean))).sort()];
+  const qualityOptions = ['All', ...Array.from(new Set(cs2Items.map(i => getTagValue(i, 'Quality')).filter(Boolean))).sort()];
+
+  const filteredItems = selectedAppid === 730 ? sortedItems.filter(item => {
+    if (filterType !== 'All' && getTagValue(item, 'Type') !== filterType) return false;
+    if (filterRarity !== 'All' && getTagValue(item, 'Rarity') !== filterRarity) return false;
+    if (filterExterior !== 'All' && getTagValue(item, 'Exterior') !== filterExterior) return false;
+    if (filterQuality !== 'All' && getTagValue(item, 'Quality') !== filterQuality) return false;
+    return true;
+  }) : sortedItems;
+
+  if (!user && isOwnProfile) {
     return (
       <div style={{ background: C.bg, minHeight: '100vh', color: C.text, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'sans-serif' }}>
         Loading...
@@ -494,23 +561,43 @@ export default function Inventory() {
         <span style={{ color: C.accent, fontWeight: 700, fontSize: '17px', marginRight: '16px', letterSpacing: '0.5px' }}>
           steameXplore
         </span>
-        <NavLink label="Dashboard" onClick={() => navigate('/dashboard')} active={false} />
-        <NavLink label="Inventory" onClick={() => {}} active={true} />
+        <NavLink label="Dashboard" onClick={() => navigate('/')} active={false} />
+        <NavLink label="Inventory" onClick={() => navigate('/inventory')} active={isOwnProfile} />
         <NavLink label="Search Users" onClick={() => navigate('/search')} active={false} />
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <img src={user.avatar.small} alt="" style={{ width: '28px', height: '28px', borderRadius: '3px' }} />
-          <span style={{ fontSize: '13px', color: C.text }}>{user.displayName}</span>
-          <button
-            onClick={handleLogout}
-            style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, padding: '4px 12px', cursor: 'pointer', borderRadius: '2px', fontSize: '12px' }}
-          >
-            Sign Out
-          </button>
+          {user ? (
+            <>
+              <img src={user.avatar.small} alt="" style={{ width: '28px', height: '28px', borderRadius: '3px' }} />
+              <span style={{ fontSize: '13px', color: C.text }}>{user.displayName}</span>
+              <button
+                onClick={handleLogout}
+                style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, padding: '4px 12px', cursor: 'pointer', borderRadius: '2px', fontSize: '12px' }}
+              >
+                Sign Out
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => navigate('/')}
+              style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, padding: '4px 12px', cursor: 'pointer', borderRadius: '2px', fontSize: '12px' }}
+            >
+              Sign In
+            </button>
+          )}
         </div>
       </div>
 
       <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '28px 24px' }}>
+        {/* Back button for other profiles */}
+        {!isOwnProfile && (
+          <div style={{ marginBottom: '16px' }}>
+            <button onClick={() => navigate(-1)} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, padding: '5px 14px', cursor: 'pointer', borderRadius: '3px', fontSize: '12px', fontFamily: 'inherit' }}>
+              ← Back
+            </button>
+          </div>
+        )}
+
         <h1 style={{ fontSize: '22px', fontWeight: 300, margin: '0 0 24px 0', color: C.text, letterSpacing: '1px', textTransform: 'uppercase' }}>
           Inventory
         </h1>
@@ -567,6 +654,44 @@ export default function Inventory() {
               })}
             </div>
 
+            {/* CS2 filter bar */}
+            {selectedAppid === 730 && selectedGame && !selectedGame.loading && !selectedGame.error && selectedGame.items.length > 0 && (
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderTop: 'none', padding: '10px 16px', display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+                {[
+                  { label: 'Type', value: filterType, setter: setFilterType, options: typeOptions },
+                  { label: 'Rarity', value: filterRarity, setter: setFilterRarity, options: rarityOptions },
+                  { label: 'Exterior', value: filterExterior, setter: setFilterExterior, options: exteriorOptions },
+                  { label: 'Quality', value: filterQuality, setter: setFilterQuality, options: qualityOptions },
+                ].map(({ label, value, setter, options }) => options.length > 2 && (
+                  <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '11px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{label}</span>
+                    <select
+                      value={value}
+                      onChange={e => setter(e.target.value)}
+                      style={{
+                        background: C.surface, border: `1px solid ${C.border}`, color: C.text,
+                        padding: '3px 8px', borderRadius: '3px', fontSize: '12px', cursor: 'pointer',
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    </select>
+                  </div>
+                ))}
+                {(filterType !== 'All' || filterRarity !== 'All' || filterExterior !== 'All' || filterQuality !== 'All') && (
+                  <button
+                    onClick={() => { setFilterType('All'); setFilterRarity('All'); setFilterExterior('All'); setFilterQuality('All'); }}
+                    style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, padding: '3px 10px', cursor: 'pointer', borderRadius: '3px', fontSize: '11px', fontFamily: 'inherit' }}
+                  >
+                    Clear
+                  </button>
+                )}
+                <span style={{ fontSize: '11px', color: C.muted, marginLeft: 'auto' }}>
+                  {filteredItems.length} / {selectedGame.items.length} items
+                </span>
+              </div>
+            )}
+
             {/* Items panel */}
             <div style={{ background: C.surface, borderRadius: '0 0 4px 4px', border: `1px solid ${C.border}`, borderTop: 'none', padding: '20px', minHeight: '200px' }}>
               {selectedGame?.loading && (
@@ -577,12 +702,14 @@ export default function Inventory() {
                   {selectedGame.error}
                 </div>
               )}
-              {selectedGame && !selectedGame.loading && !selectedGame.error && selectedGame.items.length === 0 && (
-                <div style={{ color: C.muted, fontSize: '14px', padding: '16px 0' }}>This inventory is empty.</div>
+              {selectedGame && !selectedGame.loading && !selectedGame.error && filteredItems.length === 0 && (
+                <div style={{ color: C.muted, fontSize: '14px', padding: '16px 0' }}>
+                  {selectedGame.items.length === 0 ? 'This inventory is empty.' : 'No items match the current filters.'}
+                </div>
               )}
-              {selectedGame && !selectedGame.loading && !selectedGame.error && selectedGame.items.length > 0 && (
+              {selectedGame && !selectedGame.loading && !selectedGame.error && filteredItems.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                  {selectedGame.items.map((item) => (
+                  {filteredItems.map((item) => (
                     <ItemSquare key={`${item.classid}_${item.instanceid}`} item={item} onClick={() => setSelectedItem(item)} />
                   ))}
                 </div>

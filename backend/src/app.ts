@@ -16,6 +16,8 @@ import inventoryRouter from './routes/inventory';
 import schemaRouter from './routes/schema';
 import priceRouter from './routes/price';
 import searchRouter from './routes/search';
+import userRouter from './routes/user';
+import accountValueRouter from './routes/accountValue';
 
 const app = express();
 
@@ -39,5 +41,7 @@ app.use('/api/inventory', inventoryRouter);
 app.use('/api/schema', schemaRouter);
 app.use('/api/price', priceRouter);
 app.use('/api/search', searchRouter);
+app.use('/api/user', userRouter);
+app.use('/api/account-value', accountValueRouter);
 
 export default app;

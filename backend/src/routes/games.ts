@@ -72,4 +72,40 @@ router.get('/recent', requireAuth, async (req, res) => {
   }
 });
 
+interface SteamSpyApp {
+  appid: number; name: string; genre: string; price: string;
+  initialprice: string; discount: string; ccu: number;
+  positive: number; negative: number; owners: string;
+}
+
+// Per-game metadata from SteamSpy: genres, price, CCU, reviews
+router.get('/meta', requireAuth, async (req, res) => {
+  const raw = ((req.query.appids as string) ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  const appids = [...new Set(raw)].slice(0, 40);
+  if (appids.length === 0) return res.json({});
+
+  const result: Record<string, { genres: string[]; price: number; is_free: boolean; ccu: number; positive: number; negative: number; owners: string }> = {};
+
+  await Promise.all(appids.map(async (id) => {
+    try {
+      const data = await withCache(`steamspy:${id}`, TTL.LONG, () =>
+        fetch(`https://steamspy.com/api.php?request=appdetails&appid=${id}`)
+          .then(r => r.json()) as Promise<SteamSpyApp>
+      );
+      const price = parseInt(data.price ?? '0', 10);
+      result[id] = {
+        genres: data.genre ? data.genre.split(',').map(g => g.trim()).filter(Boolean) : [],
+        price,
+        is_free: price === 0,
+        ccu: data.ccu ?? 0,
+        positive: data.positive ?? 0,
+        negative: data.negative ?? 0,
+        owners: data.owners ?? '',
+      };
+    } catch { /* skip failed lookups */ }
+  }));
+
+  res.json(result);
+});
+
 export default router;

@@ -45,4 +45,33 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+// Resolve badge image URLs via Steam's economy classinfo API (uses communityitemid as classid).
+// Returns { [communityitemid]: full_image_url }
+router.get('/badge-images', requireAuth, async (req, res) => {
+  const ids = ((req.query.communityitemids as string) ?? '')
+    .split(',').map(s => s.trim()).filter(Boolean).slice(0, 30);
+  if (ids.length === 0) return res.json({});
+
+  const params: Record<string, string | number> = { appid: 753, class_count: ids.length };
+  ids.forEach((id, i) => { params[`classid${i}`] = id; });
+
+  try {
+    const data = await withCache(
+      `badge:imgs:${[...ids].sort().join(',')}`,
+      TTL.LONG,
+      () => steamFetch<{ result: Record<string, { icon_url?: string } | boolean> }>(
+        '/ISteamEconomy/GetAssetClassInfo/v1', params
+      )
+    );
+    const result: Record<string, string> = {};
+    for (const [k, v] of Object.entries(data.result)) {
+      if (k === 'success' || typeof v !== 'object' || !v?.icon_url) continue;
+      result[k] = `https://community.cloudflare.steamstatic.com/economy/image/${v.icon_url}/80fx80f`;
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message });
+  }
+});
+
 export default router;

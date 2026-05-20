@@ -64,7 +64,7 @@ function CountryFlag({ code }: { code: string }) {
   return <span style={{ fontSize: '16px', lineHeight: 1 }}>{String.fromCodePoint(...codePoints)}</span>;
 }
 
-function ResultCard({ result, query }: { result: PlayerSearchResult; query: string }) {
+function ResultCard({ result, query, onNavigate }: { result: PlayerSearchResult; query: string; onNavigate: (steamid: string) => void }) {
   const [hovered, setHovered] = useState(false);
   const personaState = Math.min(result.personastate, PERSONA_LABEL.length - 1);
   const stateColor = PERSONA_COLOR[personaState];
@@ -74,6 +74,7 @@ function ResultCard({ result, query }: { result: PlayerSearchResult; query: stri
 
   return (
     <div
+      onClick={() => onNavigate(result.steamid)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -82,6 +83,7 @@ function ResultCard({ result, query }: { result: PlayerSearchResult; query: stri
         border: `1px solid ${hovered ? C.accent : C.border}`,
         borderRadius: '4px', padding: '16px 20px',
         marginBottom: '8px', transition: 'background 0.12s, border-color 0.12s',
+        cursor: 'pointer',
       }}
     >
       {/* Avatar */}
@@ -144,22 +146,32 @@ function ResultCard({ result, query }: { result: PlayerSearchResult; query: stri
       </div>
 
       {/* Actions */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flexShrink: 0 }}>
-        <a
-          href={result.profileurl}
-          target="_blank"
-          rel="noreferrer"
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+        <button
+          onClick={() => onNavigate(result.steamid)}
           style={{
             display: 'block', textAlign: 'center',
             background: 'linear-gradient(180deg, #4c7a2e 0%, #3a5e22 100%)',
             border: '1px solid #2a4418',
             color: '#fff', padding: '7px 18px',
             borderRadius: '3px', fontSize: '13px',
-            fontWeight: 600, textDecoration: 'none',
+            fontWeight: 600, cursor: 'pointer',
             letterSpacing: '0.3px', fontFamily: 'inherit',
           }}
         >
           View Profile
+        </button>
+        <a
+          href={result.profileurl}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            display: 'block', textAlign: 'center',
+            color: C.muted, fontSize: '11px',
+            textDecoration: 'none', padding: '4px',
+          }}
+        >
+          Steam ↗
         </a>
       </div>
     </div>
@@ -335,7 +347,7 @@ export default function SearchUsers() {
               {results.length} result{results.length !== 1 ? 's' : ''} for "{searchedQuery}"
             </div>
             {results.map((r) => (
-              <ResultCard key={r.steamid} result={r} query={searchedQuery} />
+              <ResultCard key={r.steamid} result={r} query={searchedQuery} onNavigate={(id) => navigate(`/user/${id}`)} />
             ))}
           </>
         )}
