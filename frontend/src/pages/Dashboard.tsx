@@ -2,10 +2,10 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   getMe, logout, getGames, getRecentGames, getLevel, getBans, getFriendCount,
-  getFriends, getGameMeta, getBadgeImages, getAccountValue, getSteamPrice,
+  getFriends, getGameMeta, getBadgeImages, getAccountValue, getSkinportPrices,
   getPublicFriends, getUserProfile,
 } from '../api/steamApi';
-import type { FriendSummary, GameMeta, Badge, SteamPriceResult } from '../api/steamApi';
+import type { FriendSummary, GameMeta, Badge, SkinportPriceResult } from '../api/steamApi';
 import type { SteamUser, OwnedGame, AccountValueData } from '../types/steam';
 import type { LevelData, BanData, RecentGame } from '../api/steamApi';
 
@@ -691,27 +691,23 @@ function GamesPanel({ games, onClose }: { games: OwnedGame[]; onClose: () => voi
 
 // ── Account Value Panel ────────────────────────────────────────────────────────
 
-function AccountValuePanel({ data }: { data: AccountValueData }) {
+function AccountValuePanel({ data, onRecalculate }: { data: AccountValueData; onRecalculate: () => void }) {
   const [tab, setTab] = useState<'games' | 'inventory' | 'badges'>('games');
-  const [steamPrices, setSteamPrices] = useState<Record<string, SteamPriceResult>>({});
-  const [steamPricesLoaded, setSteamPricesLoaded] = useState(false);
+  // Skinport batch prices for CS2 items (fetched once when Inventory tab opens)
+  const [skinportPrices, setSkinportPrices] = useState<Record<string, SkinportPriceResult>>({});
+  const [skinportLoaded, setSkinportLoaded] = useState(false);
   const APP_LABEL: Record<number, string> = { 730: 'CS2', 570: 'Dota 2', 440: 'TF2', 252490: 'Rust' };
 
   useEffect(() => {
-    if (tab !== 'inventory' || steamPricesLoaded || data.inventory.top_items.length === 0) return;
-    setSteamPricesLoaded(true);
-    Promise.all(
-      data.inventory.top_items.map(item =>
-        getSteamPrice(item.appid, item.market_hash_name)
-          .then(p => ({ key: item.market_hash_name, price: p }))
-          .catch(() => ({ key: item.market_hash_name, price: {} as SteamPriceResult }))
-      )
-    ).then(results => {
-      const map: Record<string, SteamPriceResult> = {};
-      for (const r of results) map[r.key] = r.price;
-      setSteamPrices(map);
-    });
-  }, [tab, steamPricesLoaded, data.inventory.top_items]);
+    if (tab !== 'inventory' || skinportLoaded) return;
+    setSkinportLoaded(true);
+    const cs2Names = data.inventory.top_items
+      .filter(i => i.appid === 730)
+      .map(i => i.market_hash_name);
+    if (cs2Names.length === 0) return;
+    // Single batch request — no per-item Steam Market calls
+    getSkinportPrices(cs2Names).then(setSkinportPrices).catch(() => {});
+  }, [tab, skinportLoaded, data.inventory.top_items]);
 
   return (
     <>
@@ -804,11 +800,14 @@ function AccountValuePanel({ data }: { data: AccountValueData }) {
                     {APP_LABEL[item.appid] ?? item.appid}
                     {item.quantity > 1 && ` · quantity: ${item.quantity}`}
                   </div>
-                  {steamPrices[item.market_hash_name]?.lowest_price && (
+                  {item.appid === 730 && skinportPrices[item.market_hash_name]?.min_price != null && (
                     <div style={{ fontSize: '10px', color: C.accent, marginTop: '1px' }}>
-                      Steam: {steamPrices[item.market_hash_name].lowest_price}
+                      Skinport: {fmtCents(Math.round((skinportPrices[item.market_hash_name].min_price ?? 0) * 100))}
                       {item.quantity > 1 && ` × ${item.quantity}`}
                     </div>
+                  )}
+                  {item.appid !== 730 && (
+                    <div style={{ fontSize: '10px', color: C.muted, marginTop: '1px', fontStyle: 'italic' }}>Steam Market</div>
                   )}
                 </div>
                 <div style={{ textAlign: 'right', flexShrink: 0 }}>
@@ -818,7 +817,17 @@ function AccountValuePanel({ data }: { data: AccountValueData }) {
               </div>
             ))}
             {data.inventory.top_items.length === 0 && (
-              <div style={{ color: C.muted, fontSize: '13px', textAlign: 'center', padding: '24px' }}>No marketable items found in CS2, Dota 2, TF2, or Rust inventories.</div>
+              <div style={{ color: C.muted, fontSize: '13px', textAlign: 'center', padding: '24px', lineHeight: 1.8 }}>
+                No inventory data loaded yet.<br />
+                <span style={{ fontSize: '12px' }}>
+                  Visit the <strong style={{ color: C.text }}>Inventory</strong> tab first to cache your items, then recalculate.
+                </span><br />
+                <button onClick={onRecalculate} style={{
+                  marginTop: '8px', background: C.surface, border: `1px solid ${C.border}`,
+                  color: C.text, padding: '5px 16px', borderRadius: '3px', cursor: 'pointer',
+                  fontSize: '12px', fontFamily: 'inherit',
+                }}>Recalculate</button>
+              </div>
             )}
           </div>
         )}
@@ -889,12 +898,6 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
         getLevel().then(setLevel).catch(() => {});
         getBans().then(setBans).catch(() => {});
         getFriendCount().then(setFriendCount).catch(() => {});
-        // Auto-calculate account value
-        setAccountValueLoading(true);
-        getAccountValue(undefined)
-          .then(setAccountValue)
-          .catch(err => setAccountValueError((err as Error).message))
-          .finally(() => setAccountValueLoading(false));
       });
     } else {
       // Another user's profile — public API loading
@@ -918,12 +921,6 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
         if (data.bans) setBans(data.bans as BanData);
         if (data.friendCount != null) setFriendCount(data.friendCount);
       }).catch(() => {});
-      // Auto-calculate account value for the viewed profile
-      setAccountValueLoading(true);
-      getAccountValue(targetSteamId)
-        .then(setAccountValue)
-        .catch(err => setAccountValueError((err as Error).message))
-        .finally(() => setAccountValueLoading(false));
     }
   }, [targetSteamId]);
 
@@ -1078,31 +1075,33 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
             {/* Total Account Value — hero stat card */}
             {(() => {
               const isLoaded = !!accountValue;
-              const isClickable = isLoaded;
+              const isClickable = !accountValueLoading;
               const handleClick = () => {
-                if (isLoaded) setPanel('account-value');
+                if (accountValueLoading) return;
+                if (isLoaded) { setPanel('account-value'); return; }
+                // First click: trigger calculation
+                setAccountValueError(null);
+                setAccountValueLoading(true);
+                getAccountValue(targetSteamId)
+                  .then(setAccountValue)
+                  .catch(err => setAccountValueError((err as Error).message))
+                  .finally(() => setAccountValueLoading(false));
               };
-              const valueLabel = accountValueError
-                ? 'Error'
-                : accountValueLoading
-                  ? 'Computing…'
-                  : isLoaded
-                    ? fmtCents(accountValue!.grand_total_cents)
-                    : '—';
+              const valueLabel = accountValueError ? 'Error' : isLoaded ? fmtCents(accountValue!.grand_total_cents) : '—';
               const subLabel = accountValueError
                 ? accountValueError.slice(0, 60)
-                : accountValueLoading
-                  ? 'Fetching prices, this may take a minute…'
-                  : isLoaded
-                    ? `Games ${fmtCents(accountValue!.games.total_cents)} · Inv ${fmtCents(accountValue!.inventory.total_cents)} · Badges ${fmtCents(accountValue!.badges.total_cents)}`
-                    : '—';
+                : isLoaded
+                  ? `Games ${fmtCents(accountValue!.games.total_cents)} · Inv ${fmtCents(accountValue!.inventory.total_cents)} · Badges ${fmtCents(accountValue!.badges.total_cents)}`
+                  : 'Click to calculate';
               return (
                 <div
                   onClick={isClickable ? handleClick : undefined}
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: '10px',
                     background: '#1a1a0e',
-                    border: `1px solid ${C.gold}${isLoaded ? 'cc' : '66'}`,
+                    borderTop: `1px solid ${C.gold}${isLoaded ? 'cc' : '66'}`,
+                    borderRight: `1px solid ${C.gold}${isLoaded ? 'cc' : '66'}`,
+                    borderBottom: `1px solid ${C.gold}${isLoaded ? 'cc' : '66'}`,
                     borderLeft: `3px solid ${C.gold}`,
                     borderRadius: '4px',
                     padding: '8px 14px',
@@ -1118,7 +1117,9 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
                     {valueLabel}
                   </span>
                   <span style={{ fontSize: '10px', color: C.muted, maxWidth: '260px' }}>
-                    {subLabel}
+                    {accountValueLoading
+                      ? <span style={{ fontSize: '9px', color: C.muted, fontStyle: 'italic' }}>Loading…</span>
+                      : subLabel}
                     {isLoaded && <span style={{ color: C.muted, fontSize: '10px', marginLeft: '4px' }}>↗</span>}
                   </span>
                 </div>
@@ -1196,7 +1197,15 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
       {panel === 'games' && games && <Overlay title={`Games Library — ${games.game_count}`} onClose={() => setPanel(null)} width={960}><GamesPanel games={games.games} onClose={() => setPanel(null)} /></Overlay>}
       {panel === 'account-value' && accountValue && (
         <Overlay title={`Total Account Value — ${fmtCents(accountValue.grand_total_cents)}`} onClose={() => setPanel(null)} width={800}>
-          <AccountValuePanel data={accountValue} />
+          <AccountValuePanel data={accountValue} onRecalculate={() => {
+            setAccountValue(null);
+            setPanel(null);
+            setAccountValueLoading(true);
+            getAccountValue(targetSteamId)
+              .then(setAccountValue)
+              .catch(err => setAccountValueError((err as Error).message))
+              .finally(() => setAccountValueLoading(false));
+          }} />
         </Overlay>
       )}
     </div>

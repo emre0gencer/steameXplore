@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
-import { withCache, TTL } from '../services/cache';
+import { withCache, peekCache, TTL } from '../services/cache';
 import { steamFetch } from '../services/steamApi';
+import { fetchFullInventory } from './inventory';
 
 const router = Router();
 
@@ -21,24 +22,6 @@ type InvDesc = {
 };
 type InvAsset = { classid: string; instanceid: string; amount: string };
 type InvResult = { assets: InvAsset[]; descriptions: InvDesc[] };
-
-// ── Inventory fetch (shares cache keys with inventory.ts) ───────────────────────
-
-async function fetchInventory(steamid: string, appid: number): Promise<InvResult> {
-  const url = `https://steamcommunity.com/inventory/${steamid}/${appid}/2?l=english&count=2000`;
-  const opts = {
-    headers: { ...BROWSER_HEADERS, Referer: `https://steamcommunity.com/profiles/${steamid}/inventory/` },
-  };
-  let res = await fetch(url, opts);
-  if (res.status === 429) {
-    await new Promise(r => setTimeout(r, 5000));
-    res = await fetch(url, opts);
-  }
-  if (!res.ok) throw new Error(`Inventory ${appid}: HTTP ${res.status}`);
-  const data = await res.json() as { success?: number; assets?: InvAsset[]; descriptions?: InvDesc[] };
-  if (!data.success) throw new Error(`Inventory ${appid}: Steam returned failure`);
-  return { assets: data.assets ?? [], descriptions: data.descriptions ?? [] };
-}
 
 // ── SteamSpy price ──────────────────────────────────────────────────────────────
 
@@ -138,14 +121,46 @@ type TopItem = {
 
 async function computeInventoryValue(steamid: string) {
   const APPIDS = [730, 570, 440, 252490] as const;
-  const invResults = await Promise.all(APPIDS.map(async (appid) => {
+
+  // Strategy: read from the shared inventory cache first (populated by the Inventory tab).
+  // Only attempt a fresh Steam fetch for appids not already cached — with generous spacing
+  // to avoid triggering Steam's burst detection that causes rwgrsn:-2 / 401 / 429.
+  const invResults: (InvResult | null)[] = [];
+  const needFetch: number[] = [];
+
+  for (const appid of APPIDS) {
+    const cached = peekCache<InvResult>(`inventory:${steamid}:${appid}:2`);
+    if (cached) {
+      invResults.push(cached);
+    } else {
+      invResults.push(null); // placeholder
+      needFetch.push(appid);
+    }
+  }
+
+  // Fetch missing appids sequentially with a 3 second gap so Steam doesn't see a burst
+  for (let i = 0; i < needFetch.length; i++) {
+    const appid = needFetch[i];
+    const idx = APPIDS.indexOf(appid as typeof APPIDS[number]);
     try {
-      return await withCache<InvResult>(
-        `inventory:${steamid}:${appid}:2`, TTL.SHORT,
-        () => fetchInventory(steamid, appid)
+      const raw = await withCache<InvResult>(
+        `inventory:${steamid}:${appid}:2`, TTL.MEDIUM,
+        async () => {
+          const full = await fetchFullInventory(steamid, String(appid), '2', '2000');
+          return { assets: full.assets as InvAsset[], descriptions: full.descriptions as InvDesc[] };
+        }
       );
-    } catch { return null; }
-  }));
+      invResults[idx] = raw;
+    } catch (err) {
+      console.error(`[accountValue] inventory ${appid} failed:`, (err as Error).message);
+    }
+    if (i < needFetch.length - 1) await new Promise(r => setTimeout(r, 3000));
+  }
+
+  // If every appid failed (cache cold and all fetches blocked), don't cache a $0 result
+  if (invResults.every(r => r === null)) {
+    throw new Error('All inventory fetches failed — will retry on next request');
+  }
 
   const [cs2Inv, dota2Inv, tf2Inv, rustInv] = invResults;
 
@@ -217,45 +232,56 @@ let lastBadgeCardFetch = 0;
 
 async function computeBadgesValue(steamid: string) {
   const data = await steamFetch<{
-    response: { badges?: { badgeid: number; appid?: number; level: number }[] };
+    response: { badges?: { badgeid: number; appid?: number; level: number; xp: number }[] };
   }>('/IPlayerService/GetBadges/v1', { steamid });
 
   const badges = (data.response.badges ?? []).filter(b => b.appid && b.appid > 0 && b.level > 0);
-  const uniqueAppIds = [...new Set(badges.map(b => b.appid!))];
 
-  const cardData = new Map<number, { card_count: number; median_price: number } | null>();
+  // Sort unique appids by total badge XP for that game, most valuable sets first.
+  // This ensures throttled runs still price the highest-value badges.
+  const appXp = new Map<number, number>();
+  for (const b of badges) appXp.set(b.appid!, (appXp.get(b.appid!) ?? 0) + (b.xp ?? 0));
+  const uniqueAppIds = [...new Set(badges.map(b => b.appid!))]
+    .sort((a, b) => (appXp.get(b) ?? 0) - (appXp.get(a) ?? 0))
+    .slice(0, 40); // cap at 40 most valuable sets to avoid runaway rate limiting
+
+  const cardData = new Map<number, { card_count: number; median_price: number }>();
 
   for (const appid of uniqueAppIds) {
-    const result = await withCache<{ card_count: number; median_price: number } | null>(
-      `badge-cards:${appid}`, TTL.LONG, async () => {
-        const now = Date.now();
-        const wait = 500 - (now - lastBadgeCardFetch);
-        if (lastBadgeCardFetch > 0 && wait > 0) await new Promise(r => setTimeout(r, wait));
-        lastBadgeCardFetch = Date.now();
+    try {
+      // Throw on failure so withCache never stores a bad result.
+      const result = await withCache<{ card_count: number; median_price: number }>(
+        `badge-cards:${appid}`, TTL.VERY_LONG, async () => {
+          const now = Date.now();
+          const wait = 1100 - (now - lastBadgeCardFetch);
+          if (lastBadgeCardFetch > 0 && wait > 0) await new Promise(r => setTimeout(r, wait));
+          lastBadgeCardFetch = Date.now();
 
-        try {
           const url =
             `https://steamcommunity.com/market/search/render/` +
             `?appid=753&category_753_item_class[]=tag_item_class_2` +
             `&category_753_Game[]=tag_Game_${appid}` +
             `&count=100&sort_column=price&sort_dir=asc&norender=0`;
-          const res = await fetch(url, { headers: BROWSER_HEADERS });
-          if (!res.ok) return null;
+          let res = await fetch(url, { headers: BROWSER_HEADERS });
+          if (res.status === 429) {
+            const retryAfter = Number(res.headers.get('Retry-After') ?? 15);
+            await new Promise(r => setTimeout(r, Math.min(retryAfter, 30) * 1000));
+            res = await fetch(url, { headers: BROWSER_HEADERS });
+          }
+          if (!res.ok) throw new Error(`Market ${appid}: HTTP ${res.status}`);
           const json = await res.json() as {
             success: boolean; total_count: number;
             results?: { sell_price: number }[];
           };
-          if (!json.success || json.total_count === 0 || !json.results?.length) return null;
+          if (!json.success || json.total_count === 0 || !json.results?.length)
+            throw new Error(`No cards for ${appid}`);
           const prices = json.results.map(r => r.sell_price).filter(p => p > 0).sort((a, b) => a - b);
-          if (!prices.length) return null;
-          return {
-            card_count: json.results.length,
-            median_price: prices[Math.floor(prices.length / 2)],
-          };
-        } catch { return null; }
-      }
-    );
-    cardData.set(appid, result);
+          if (!prices.length) throw new Error(`No prices for ${appid}`);
+          return { card_count: json.results.length, median_price: prices[Math.floor(prices.length / 2)] };
+        }
+      );
+      cardData.set(appid, result);
+    } catch { /* skip — not cached, will retry next calculation */ }
   }
 
   let total_cents = 0;
@@ -279,19 +305,31 @@ router.get('/', requireAuth, async (req, res) => {
     ? querySteamId
     : req.session.user!.steamid;
   try {
-    const result = await withCache(`${steamid}:account-value`, TTL.LONG, async () => {
-      const [games, inventory, badges] = await Promise.all([
-        computeGamesValue(steamid),
-        computeInventoryValue(steamid),
-        computeBadgesValue(steamid),
-      ]);
-      return {
-        games, inventory, badges,
-        grand_total_cents: games.total_cents + inventory.total_cents + badges.total_cents,
-        cached_at: Date.now(),
-      };
+    // Each component is cached independently.
+    // A failed inventory does not poison games/badges and is not cached —
+    // the next request will retry while reusing the already-cached games/badges.
+    const [gamesResult, inventoryResult, badgesResult] = await Promise.allSettled([
+      withCache(`${steamid}:games-value`, TTL.LONG, () => computeGamesValue(steamid)),
+      withCache(`${steamid}:inventory-value`, TTL.MEDIUM, () => computeInventoryValue(steamid)),
+      withCache(`${steamid}:badges-value`, TTL.VERY_LONG, () => computeBadgesValue(steamid)),
+    ]);
+
+    if (inventoryResult.status === 'rejected') {
+      console.error('[accountValue] inventory computation failed:', (inventoryResult.reason as Error).message);
+    }
+
+    const games = gamesResult.status === 'fulfilled' ? gamesResult.value
+      : { total_cents: 0, game_count: 0, priced_count: 0, top_games: [] };
+    const emptyInventory = { total_cents: 0, cs2_cents: 0, dota2_cents: 0, tf2_cents: 0, rust_cents: 0, top_items: [] as TopItem[] };
+    const inventory = inventoryResult.status === 'fulfilled' ? inventoryResult.value : emptyInventory;
+    const badges = badgesResult.status === 'fulfilled' ? badgesResult.value
+      : { total_cents: 0, badge_count: 0, priced_count: 0 };
+
+    res.json({
+      games, inventory, badges,
+      grand_total_cents: games.total_cents + inventory.total_cents + badges.total_cents,
+      cached_at: Date.now(),
     });
-    res.json(result);
   } catch (err) {
     res.status(502).json({ error: (err as Error).message });
   }

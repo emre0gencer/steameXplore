@@ -140,7 +140,7 @@ function steamFailureMessage(response: FetchResponse, data?: SteamInventoryPaylo
   return steamMessage ?? `Steam returned ${response.status} ${response.statusText}`;
 }
 
-async function fetchFullInventory(
+export async function fetchFullInventory(
   steamid: string,
   appid: string,
   contextid: string,
@@ -155,6 +155,11 @@ async function fetchFullInventory(
     const url = buildInventoryUrl(steamid, appid, contextid, count, startAssetId);
     const response = await fetchInventoryPage(url, steamid);
     const { data, rawBody } = await parseSteamResponse(response);
+
+    // rwgrsn: -2 = no inventory for this game/context (user never played or context doesn't exist)
+    if (data?.rwgrsn === -2) {
+      throw new Error('No inventory found for this game — the account has never had items here.');
+    }
 
     if (!response.ok || !data || data.success === false || data.success === 0) {
       const rawSnippet = rawBody.slice(0, 250);
@@ -220,7 +225,9 @@ async function handleInventoryRequest(
         ? 403
         : message.includes('rejected')
           ? 400
-          : 502;
+          : message.includes('No inventory found')
+            ? 404
+            : 502;
 
     return res.status(status).json({
       error: message,

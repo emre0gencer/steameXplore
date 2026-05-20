@@ -491,36 +491,52 @@ export default function Inventory({ targetSteamId }: { targetSteamId?: string } 
   }, [selectedAppid]);
 
   async function loadInventories() {
+    // For the own profile, filter TARGET_GAMES to only games the user owns.
+    // For public profiles the game list may be private, so try all.
+    let gamesToLoad = TARGET_GAMES;
+    if (isOwnProfile) {
+      try {
+        const owned = await getGames();
+        const ownedSet = new Set(owned.games.map((g) => g.appid));
+        gamesToLoad = TARGET_GAMES.filter((tg) => ownedSet.has(tg.appid));
+      } catch {
+        // If we can't fetch the game list, fall back to trying all
+      }
+    }
+
     const initial: GameInventory[] = TARGET_GAMES.map((tg) => ({
       appid: tg.appid,
       name: tg.name,
       items: [],
-      loading: true,
-      error: null,
+      loading: gamesToLoad.some((g) => g.appid === tg.appid),
+      error: gamesToLoad.some((g) => g.appid === tg.appid) ? null : 'Not in library',
     }));
     setGameInventories(initial);
 
-    await Promise.all(
-      initial.map(async (game) => {
-        try {
-          const data = isOwnProfile
-            ? await getInventory(game.appid)
-            : await getPublicInventory(targetSteamId!, game.appid);
-          const items = buildItems(data);
-          setGameInventories((prev) =>
-            prev.map((g) => g.appid === game.appid ? { ...g, items, loading: false } : g)
-          );
-        } catch (err) {
-          setGameInventories((prev) =>
-            prev.map((g) =>
-              g.appid === game.appid
-                ? { ...g, loading: false, error: (err as Error).message }
-                : g
-            )
-          );
-        }
-      })
-    );
+    // Load sequentially with a small gap to avoid Steam rate-limiting parallel requests
+    for (let i = 0; i < gamesToLoad.length; i++) {
+      const game = gamesToLoad[i];
+      try {
+        const data = isOwnProfile
+          ? await getInventory(game.appid)
+          : await getPublicInventory(targetSteamId!, game.appid);
+        const items = buildItems(data);
+        setGameInventories((prev) =>
+          prev.map((g) => g.appid === game.appid ? { ...g, items, loading: false } : g)
+        );
+      } catch (err) {
+        const msg = (err as Error).message;
+        const friendly = msg.includes('No inventory found')
+          ? 'No items — this game has no inventory for this account.'
+          : msg;
+        setGameInventories((prev) =>
+          prev.map((g) =>
+            g.appid === game.appid ? { ...g, loading: false, error: friendly } : g
+          )
+        );
+      }
+      if (i < gamesToLoad.length - 1) await new Promise(r => setTimeout(r, 600));
+    }
   }
 
   const handleLogout = async () => {
@@ -635,7 +651,9 @@ export default function Inventory({ targetSteamId }: { targetSteamId?: string } 
                     {game.loading ? (
                       <span style={{ fontSize: '11px', color: C.muted, fontStyle: 'italic' }}>loading…</span>
                     ) : game.error ? (
-                      <span style={{ fontSize: '11px', color: '#e74c3c' }}>!</span>
+                      <span style={{ fontSize: '11px', color: game.error === 'Not in library' || game.error.startsWith('No items') ? C.muted : '#e74c3c' }}>
+                        {game.error === 'Not in library' ? '—' : game.error.startsWith('No items') ? '0' : '!'}
+                      </span>
                     ) : (
                       <span style={{
                         background: isActive ? C.border : '#1e2d3d',
@@ -698,7 +716,10 @@ export default function Inventory({ targetSteamId }: { targetSteamId?: string } 
                 <div style={{ color: C.muted, fontSize: '14px', padding: '16px 0' }}>Loading inventory…</div>
               )}
               {selectedGame?.error && (
-                <div style={{ color: '#e74c3c', fontSize: '14px', background: C.card, padding: '12px 16px', borderRadius: '4px' }}>
+                <div style={{
+                  color: selectedGame.error === 'Not in library' || selectedGame.error.startsWith('No items') ? C.muted : '#e74c3c',
+                  fontSize: '14px', background: C.card, padding: '12px 16px', borderRadius: '4px',
+                }}>
                   {selectedGame.error}
                 </div>
               )}
