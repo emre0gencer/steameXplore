@@ -108,9 +108,9 @@ export interface GameMeta {
   owners: string;
 }
 
-// Resolves badge image URLs via GetAssetClassInfo. Pass communityitemids from badge data.
-// Returns { [communityitemid]: full_image_url }
-export async function getBadgeImages(communityitemids: string[]): Promise<Record<string, string>> {
+// Resolves badge image URLs and names via GetAssetClassInfo. Pass communityitemids from badge data.
+// Returns { [communityitemid]: { url, name } }
+export async function getBadgeImages(communityitemids: string[]): Promise<Record<string, { url: string; name: string | null }>> {
   if (communityitemids.length === 0) return {};
   const qs = new URLSearchParams({ communityitemids: communityitemids.join(',') });
   const res = await fetch(`${BASE}/api/level/badge-images?${qs}`, { credentials: 'include' });

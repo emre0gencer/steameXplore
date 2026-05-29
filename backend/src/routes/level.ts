@@ -59,14 +59,17 @@ router.get('/badge-images', requireAuth, async (req, res) => {
     const data = await withCache(
       `badge:imgs:${[...ids].sort().join(',')}`,
       TTL.LONG,
-      () => steamFetch<{ result: Record<string, { icon_url?: string } | boolean> }>(
+      () => steamFetch<{ result: Record<string, { icon_url?: string; name?: string } | boolean> }>(
         '/ISteamEconomy/GetAssetClassInfo/v1', params
       )
     );
-    const result: Record<string, string> = {};
+    const result: Record<string, { url: string; name: string | null }> = {};
     for (const [k, v] of Object.entries(data.result)) {
       if (k === 'success' || typeof v !== 'object' || !v?.icon_url) continue;
-      result[k] = `https://community.cloudflare.steamstatic.com/economy/image/${v.icon_url}/80fx80f`;
+      result[k] = {
+        url: `https://community.cloudflare.steamstatic.com/economy/image/${v.icon_url}/96fx96f`,
+        name: v.name ?? null,
+      };
     }
     res.json(result);
   } catch (err) {

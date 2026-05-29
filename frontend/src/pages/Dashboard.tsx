@@ -132,8 +132,8 @@ function StatusRow({ label, value, ok }: { label: string; value: string; ok: boo
 
 // ── Overlay shell — FIXED height so panels never shift ─────────────────────────
 
-function Overlay({ title, onClose, children, width = 860 }: {
-  title: string; onClose: () => void; children: React.ReactNode; width?: number;
+function Overlay({ title, subtitle, onClose, children, width = 860 }: {
+  title: string; subtitle?: string; onClose: () => void; children: React.ReactNode; width?: number;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -166,7 +166,10 @@ function Overlay({ title, onClose, children, width = 860 }: {
           padding: '14px 20px', background: C.surface,
           borderBottom: `1px solid ${C.border}`, flexShrink: 0,
         }}>
-          <span style={{ fontSize: '14px', fontWeight: 700, color: C.text, textTransform: 'uppercase', letterSpacing: '1px' }}>{title}</span>
+          <div>
+            <span style={{ fontSize: '14px', fontWeight: 700, color: C.text, textTransform: 'uppercase', letterSpacing: '1px' }}>{title}</span>
+            {subtitle && <div style={{ fontSize: '12px', color: C.muted, marginTop: '3px' }}>{subtitle}</div>}
+          </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.muted, cursor: 'pointer', fontSize: '18px', lineHeight: 1, padding: '2px 6px', fontFamily: 'inherit' }}>✕</button>
         </div>
         {/* Child panels manage their own controls + scroll area */}
@@ -292,9 +295,32 @@ function FriendsPanel({ onClose, steamid }: { onClose: () => void; steamid?: str
 
 // ── Badges Panel ──────────────────────────────────────────────────────────────
 
-function BadgesPanel({ badges, onClose }: { badges: Badge[]; onClose: () => void }) {
-  // Map communityitemid → resolved image URL from GetAssetClassInfo
-  const [imgMap, setImgMap] = useState<Record<string, string>>({});
+function BadgeRow({ b, src, name }: { b: Badge; src: string | null; name: string }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const showImg = !!src && !imgFailed;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '16px', padding: '14px 20px', borderBottom: `1px solid ${C.border}` }}>
+      {showImg && (
+        <img
+          src={src!} alt=""
+          style={{ width: '72px', height: '72px', objectFit: 'contain', flexShrink: 0 }}
+          onError={() => setImgFailed(true)}
+        />
+      )}
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: '15px', fontWeight: 700, color: C.text, lineHeight: 1.3 }}>{name}</div>
+        <div style={{ fontSize: '12px', color: C.muted, marginTop: '4px' }}>Level {b.level} · {b.xp.toLocaleString()} XP</div>
+        <div style={{ fontSize: '12px', color: C.muted, marginTop: '2px' }}>Unlocked {fmtDate(b.completion_time)}</div>
+        {b.scarcity != null && (
+          <div style={{ fontSize: '11px', color: C.border, marginTop: '2px' }}>{b.scarcity.toLocaleString()} owners</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BadgesPanel({ badges, onClose, gameNames }: { badges: Badge[]; onClose: () => void; gameNames: Record<number, string> }) {
+  const [imgMap, setImgMap] = useState<Record<string, { url: string; name: string | null }>>({});
 
   useEffect(() => {
     const ids = badges.map(b => b.communityitemid).filter(Boolean) as string[];
@@ -302,68 +328,59 @@ function BadgesPanel({ badges, onClose }: { badges: Badge[]; onClose: () => void
     getBadgeImages(ids).then(setImgMap).catch(() => {});
   }, [badges]);
 
-  // Sort chronologically (newest first). Featured = highest XP badge.
   const sorted = [...badges].sort((a, b) => b.completion_time - a.completion_time);
-  const featured = badges.reduce<Badge | null>((best, b) => (!best || b.xp > best.xp) ? b : best, null);
-  const ordered = featured
-    ? [featured, ...sorted.filter(b => !(b.badgeid === featured.badgeid && b.appid === featured.appid))]
-    : sorted;
+
+  // Group badges by game (appid) or 0 for community badges, preserving newest-first order within each group
+  const groups = new Map<number, { label: string; badges: Badge[] }>();
+  for (const b of sorted) {
+    const key = b.appid ?? 0;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        label: b.appid ? (gameNames[b.appid] ?? 'Steam Game') : 'Steam Community',
+        badges: [],
+      });
+    }
+    groups.get(key)!.badges.push(b);
+  }
 
   function badgeImg(b: Badge): string | null {
-    // Game badge with economy image (resolved via GetAssetClassInfo)
-    if (b.communityitemid && imgMap[b.communityitemid]) return imgMap[b.communityitemid];
-    // Community badge — static path (works for many standard Steam badges)
-    if (!b.appid) return `https://community.cloudflare.steamstatic.com/public/images/badges/${b.badgeid}/${b.level}_80px.png`;
-    return null;
+    if (b.communityitemid && imgMap[b.communityitemid]?.url) return imgMap[b.communityitemid].url;
+    if (b.appid) return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${b.appid}/badge_${b.level}.png`;
+    return `https://community.cloudflare.steamstatic.com/public/images/badges/${b.badgeid}/${b.level}_80px.png`;
+  }
+
+  function badgeName(b: Badge): string {
+    if (b.communityitemid && imgMap[b.communityitemid]?.name) return imgMap[b.communityitemid].name!;
+    if (b.appid) return `${gameNames[b.appid] ?? 'Badge'} — Level ${b.level}`;
+    return 'Community Badge';
   }
 
   return (
-    <>
-      <div style={{ flexShrink: 0, padding: '10px 20px', borderBottom: `1px solid ${C.border}`, fontSize: '12px', color: C.muted, background: C.bg }}>
-        Sorted newest first · <span style={{ color: C.gold }}>⭐ Featured</span> = highest XP badge
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', minHeight: 0 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
-          {ordered.map((b, i) => {
-            const isFeatured = i === 0 && !!featured;
-            const src = badgeImg(b);
-            return (
-              <div
-                key={`${b.badgeid}_${b.appid ?? 'c'}_${i}`}
-                title={`${b.xp} XP · Level ${b.level} · ${b.scarcity?.toLocaleString()} owners`}
-                style={{
-                  background: C.card,
-                  border: isFeatured ? `2px solid ${C.gold}` : `1px solid ${C.border}`,
-                  borderRadius: '5px', padding: '12px 10px',
-                  width: '104px', textAlign: 'center', flexShrink: 0, boxSizing: 'border-box',
-                }}
-              >
-                {isFeatured && (
-                  <div style={{ fontSize: '10px', color: C.gold, fontWeight: 700, marginBottom: '5px', letterSpacing: '0.4px' }}>⭐ Featured</div>
-                )}
-                {src ? (
-                  <img
-                    src={src} alt=""
-                    style={{ width: '64px', height: '64px', objectFit: 'contain', display: 'block', margin: '0 auto 6px' }}
-                    onError={e => { (e.target as HTMLImageElement).style.opacity = '0'; }}
-                  />
-                ) : (
-                  <div style={{ width: '64px', height: '64px', margin: '0 auto 6px', borderRadius: '50%', background: C.surface, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <span style={{ fontSize: '11px', color: C.muted }}>#{b.badgeid}</span>
-                  </div>
-                )}
-                <div style={{ fontSize: '11px', color: C.accent, fontWeight: 700 }}>{b.xp.toLocaleString()} XP</div>
-                <div style={{ fontSize: '10px', color: C.muted, marginTop: '2px' }}>Lvl {b.level}</div>
-                <div style={{ fontSize: '10px', color: C.muted }}>{fmtDate(b.completion_time)}</div>
-                {b.scarcity != null && (
-                  <div style={{ fontSize: '10px', color: C.border, marginTop: '2px' }}>{b.scarcity.toLocaleString()} owners</div>
-                )}
-              </div>
-            );
-          })}
+    <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+      {[...groups.entries()].map(([key, group]) => (
+        <div key={key}>
+          <div style={{
+            padding: '10px 20px',
+            background: C.nav,
+            borderBottom: `1px solid ${C.border}`,
+            borderTop: `1px solid ${C.border}`,
+            fontSize: '15px',
+            fontWeight: 700,
+            color: C.text,
+          }}>
+            {group.label}
+          </div>
+          {group.badges.map((b, i) => (
+            <BadgeRow
+              key={`${b.badgeid}_${b.appid ?? 'c'}_${i}`}
+              b={b}
+              src={badgeImg(b)}
+              name={badgeName(b)}
+            />
+          ))}
         </div>
-      </div>
-    </>
+      ))}
+    </div>
   );
 }
 
@@ -1192,7 +1209,20 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
 
       {/* Overlay panels */}
       {panel === 'friends' && <Overlay title="Friends" onClose={() => setPanel(null)}><FriendsPanel onClose={() => setPanel(null)} steamid={targetSteamId} /></Overlay>}
-      {panel === 'badges' && level && <Overlay title={`Badges — ${level.badges.length}`} onClose={() => setPanel(null)} width={920}><BadgesPanel badges={level.badges} onClose={() => setPanel(null)} /></Overlay>}
+      {panel === 'badges' && level && (() => {
+  const totalXP = level.badges.reduce((s, b) => s + b.xp, 0);
+  const estValue = fmtCents(Math.round(totalXP * 0.1));
+  return (
+    <Overlay
+      title={`Badges — ${level.badges.length} · ${totalXP.toLocaleString()} XP total · Value ${estValue}*`}
+      subtitle={'*Badge valuation is estimated at $0.10 / 100 XP.'}
+      onClose={() => setPanel(null)}
+      width={920}
+    >
+      <BadgesPanel badges={level.badges} onClose={() => setPanel(null)} gameNames={Object.fromEntries((games?.games ?? []).map(g => [g.appid, g.name]))} />
+    </Overlay>
+  );
+})()}
       {panel === 'playtime' && games && <Overlay title={`Playtime — ${fmt(totalMins)} total`} onClose={() => setPanel(null)}><PlaytimePanel games={games.games} onClose={() => setPanel(null)} /></Overlay>}
       {panel === 'games' && games && <Overlay title={`Games Library — ${games.game_count}`} onClose={() => setPanel(null)} width={960}><GamesPanel games={games.games} onClose={() => setPanel(null)} /></Overlay>}
       {panel === 'account-value' && accountValue && (
