@@ -2,14 +2,21 @@ import { Router, type Request, type Response as ExpressResponse } from 'express'
 
 type FetchResponse = globalThis.Response;
 import { requireAuth } from '../middleware/requireAuth';
-import { withCache, TTL } from '../services/cache';
+import { withCache, TTL, CooldownError } from '../services/cache';
+import { withHostQueue, markHostThrottled } from '../services/httpQueue';
 
 const router = Router();
 
 const DEFAULT_CONTEXT_ID = '2';
 const DEFAULT_COUNT = '2000';
-const MAX_RETRY_SECONDS = 30;
 const MAX_COUNT = 5000;
+const STEAM_COMMUNITY_HOST = 'steamcommunity.com';
+// Minimum gap between any two steamcommunity.com requests (inventory + market share this queue).
+const STEAM_COMMUNITY_MIN_GAP_MS = 1500;
+// On any 429 or rwgrsn:-2 from Steam, lock the whole host out for this long.
+// Retrying inside a Steam burst-detect ban only extends the ban, so we fail fast
+// and let the circuit breaker protect all subsequent appids.
+const STEAM_THROTTLE_COOLDOWN_MS = 120_000;
 
 type SteamInventoryPayload = {
   assets?: {
@@ -82,6 +89,13 @@ function buildInventoryUrl(
 
 // Steam throttles inventory endpoints aggressively and sometimes returns 403/HTML to
 // non-browser-looking requests even when an inventory is public in the browser.
+// All fetches go through the shared steamcommunity.com queue so concurrent inventory
+// requests (and market priceoverview lookups in accountValue.ts) can't burst together.
+//
+// IMPORTANT: we do NOT retry on 429. Steam's burst-detection ban grows every time we
+// hit it while throttled — retrying makes the ban worse, not shorter. Instead, we trip
+// the per-host circuit breaker so every subsequent queued fetch short-circuits with a
+// CooldownError until Steam's window expires.
 async function fetchInventoryPage(url: string, steamid: string): Promise<FetchResponse> {
   const fetchOptions: RequestInit = {
     headers: {
@@ -94,13 +108,11 @@ async function fetchInventoryPage(url: string, steamid: string): Promise<FetchRe
     },
   };
 
-  let response = await fetch(url, fetchOptions);
+  const response = await withHostQueue(STEAM_COMMUNITY_HOST, STEAM_COMMUNITY_MIN_GAP_MS,
+    () => fetch(url, fetchOptions));
 
   if (response.status === 429) {
-    const retryAfter = Number(response.headers.get('Retry-After') ?? 5);
-    const wait = Math.min(retryAfter, MAX_RETRY_SECONDS) * 1000;
-    await new Promise((resolve) => setTimeout(resolve, wait));
-    response = await fetch(url, fetchOptions);
+    markHostThrottled(STEAM_COMMUNITY_HOST, STEAM_THROTTLE_COOLDOWN_MS);
   }
 
   return response;
@@ -156,9 +168,15 @@ export async function fetchFullInventory(
     const response = await fetchInventoryPage(url, steamid);
     const { data, rawBody } = await parseSteamResponse(response);
 
-    // rwgrsn: -2 = no inventory for this game/context (user never played or context doesn't exist)
+    // rwgrsn:-2 is ambiguous — Steam returns it both for genuinely-empty inventories AND
+    // as part of its burst-throttle response. Since a false "empty" for a populated game
+    // (e.g. CS2 with items) is far worse than a false "throttled" for a truly empty one,
+    // we treat it as throttle and trip the circuit breaker so the other appids in flight
+    // don't pile on. Real empties will hit this every retry but at least won't mask a
+    // real inventory behind a 404.
     if (data?.rwgrsn === -2) {
-      throw new Error('No inventory found for this game — the account has never had items here.');
+      markHostThrottled(STEAM_COMMUNITY_HOST, STEAM_THROTTLE_COOLDOWN_MS);
+      throw new Error('Steam is throttling inventory requests (rwgrsn:-2). Try again later.');
     }
 
     if (!response.ok || !data || data.success === false || data.success === 0) {
@@ -213,11 +231,24 @@ async function handleInventoryRequest(
   try {
     const data = await withCache(
       `inventory:${steamid}:${appid}:${contextid}`,
-      TTL.SHORT,
+      TTL.LONG,
       () => fetchFullInventory(steamid, appid, contextid, count)
     );
     return res.json(data);
   } catch (err) {
+    // Cache-layer negative-cooldown: tell the client exactly how long to wait.
+    if (err instanceof CooldownError) {
+      res.setHeader('Retry-After', String(err.retryAfterSeconds));
+      return res.status(503).json({
+        error: err.message,
+        retry_after_seconds: err.retryAfterSeconds,
+        steamid,
+        appid,
+        contextid,
+        count,
+      });
+    }
+
     const message = (err as Error).message;
     const status = message.includes('throttling')
       ? 429

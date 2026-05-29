@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getMe, getInventory, getPublicInventory, logout, getSteamPrice, getSkinportPrices } from '../api/steamApi';
+import { getMe, getInventory, getPublicInventory, logout, getSteamPrice, getSkinportPrices, InventoryUnavailableError } from '../api/steamApi';
 import type { SkinportPriceResult, SteamPriceResult } from '../api/steamApi';
 import type { SteamUser, InventoryDescription } from '../types/steam';
 
@@ -40,6 +40,8 @@ interface GameInventory {
   items: InventoryItem[];
   loading: boolean;
   error: string | null;
+  // ms timestamp at which an auto-retry should fire. null = no pending retry.
+  retryAt: number | null;
 }
 
 const C = {
@@ -490,6 +492,41 @@ export default function Inventory({ targetSteamId }: { targetSteamId?: string } 
     setFilterQuality('All');
   }, [selectedAppid]);
 
+  // Fetch one game's inventory and merge the result into state.
+  // On a backend cooldown response (503 with retry_after_seconds), schedules an
+  // auto-retry via retryAt so the per-second timer effect below can re-fire it.
+  async function fetchOneGame(game: { appid: number; name: string }) {
+    try {
+      const data = isOwnProfile
+        ? await getInventory(game.appid)
+        : await getPublicInventory(targetSteamId!, game.appid);
+      const items = buildItems(data);
+      setGameInventories((prev) =>
+        prev.map((g) =>
+          g.appid === game.appid ? { ...g, items, loading: false, error: null, retryAt: null } : g
+        )
+      );
+    } catch (err) {
+      const msg = (err as Error).message;
+      const retryAfter = err instanceof InventoryUnavailableError ? err.retryAfterSeconds : undefined;
+      const friendly = msg.includes('No inventory found')
+        ? 'No items — this game has no inventory for this account.'
+        : msg;
+      setGameInventories((prev) =>
+        prev.map((g) =>
+          g.appid === game.appid
+            ? {
+                ...g,
+                loading: false,
+                error: friendly,
+                retryAt: retryAfter ? Date.now() + retryAfter * 1000 : null,
+              }
+            : g
+        )
+      );
+    }
+  }
+
   async function loadInventories() {
     // For the own profile, filter TARGET_GAMES to only games the user owns.
     // For public profiles the game list may be private, so try all.
@@ -510,34 +547,42 @@ export default function Inventory({ targetSteamId }: { targetSteamId?: string } 
       items: [],
       loading: gamesToLoad.some((g) => g.appid === tg.appid),
       error: gamesToLoad.some((g) => g.appid === tg.appid) ? null : 'Not in library',
+      retryAt: null,
     }));
     setGameInventories(initial);
 
     // Load sequentially with a small gap to avoid Steam rate-limiting parallel requests
     for (let i = 0; i < gamesToLoad.length; i++) {
-      const game = gamesToLoad[i];
-      try {
-        const data = isOwnProfile
-          ? await getInventory(game.appid)
-          : await getPublicInventory(targetSteamId!, game.appid);
-        const items = buildItems(data);
-        setGameInventories((prev) =>
-          prev.map((g) => g.appid === game.appid ? { ...g, items, loading: false } : g)
-        );
-      } catch (err) {
-        const msg = (err as Error).message;
-        const friendly = msg.includes('No inventory found')
-          ? 'No items — this game has no inventory for this account.'
-          : msg;
-        setGameInventories((prev) =>
-          prev.map((g) =>
-            g.appid === game.appid ? { ...g, loading: false, error: friendly } : g
-          )
-        );
-      }
+      await fetchOneGame(gamesToLoad[i]);
       if (i < gamesToLoad.length - 1) await new Promise(r => setTimeout(r, 600));
     }
   }
+
+  // 1-second tick for countdown UI + auto-retry on any game whose retryAt has elapsed.
+  // Uses a ref so we don't re-create the interval on every state change.
+  const giRef = useRef<GameInventory[]>([]);
+  useEffect(() => { giRef.current = gameInventories; }, [gameInventories]);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTick((t) => t + 1);
+      const now = Date.now();
+      const due = giRef.current.filter((g) => g.retryAt !== null && g.retryAt <= now && !g.loading);
+      if (due.length === 0) return;
+      setGameInventories((prev) =>
+        prev.map((g) =>
+          due.some((d) => d.appid === g.appid)
+            ? { ...g, loading: true, error: null, retryAt: null }
+            : g
+        )
+      );
+      for (const g of due) {
+        fetchOneGame({ appid: g.appid, name: g.name });
+      }
+    }, 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleLogout = async () => {
     await logout();
@@ -715,14 +760,23 @@ export default function Inventory({ targetSteamId }: { targetSteamId?: string } 
               {selectedGame?.loading && (
                 <div style={{ color: C.muted, fontSize: '14px', padding: '16px 0' }}>Loading inventory…</div>
               )}
-              {selectedGame?.error && (
-                <div style={{
-                  color: selectedGame.error === 'Not in library' || selectedGame.error.startsWith('No items') ? C.muted : '#e74c3c',
-                  fontSize: '14px', background: C.card, padding: '12px 16px', borderRadius: '4px',
-                }}>
-                  {selectedGame.error}
-                </div>
-              )}
+              {selectedGame?.error && (() => {
+                const cooldownLeft = selectedGame.retryAt !== null
+                  ? Math.max(0, Math.ceil((selectedGame.retryAt - Date.now()) / 1000))
+                  : 0;
+                const isCooldown = cooldownLeft > 0;
+                const isBenign = selectedGame.error === 'Not in library' || selectedGame.error.startsWith('No items');
+                return (
+                  <div style={{
+                    color: isCooldown ? '#f1c40f' : isBenign ? C.muted : '#e74c3c',
+                    fontSize: '14px', background: C.card, padding: '12px 16px', borderRadius: '4px',
+                  }}>
+                    {isCooldown
+                      ? `Steam is throttling inventory requests — auto-retrying in ${cooldownLeft}s…`
+                      : selectedGame.error}
+                  </div>
+                );
+              })()}
               {selectedGame && !selectedGame.loading && !selectedGame.error && filteredItems.length === 0 && (
                 <div style={{ color: C.muted, fontSize: '14px', padding: '16px 0' }}>
                   {selectedGame.items.length === 0 ? 'This inventory is empty.' : 'No items match the current filters.'}

@@ -158,21 +158,38 @@ export async function getGameMeta(appids: number[]): Promise<Record<number, Game
   return out;
 }
 
+// Thrown by getInventory / getPublicInventory when the backend rejects the request.
+// Carries the backend's retry_after_seconds (set on 503 cooldown responses) so the UI
+// can render a countdown and auto-retry.
+export class InventoryUnavailableError extends Error {
+  readonly retryAfterSeconds?: number;
+  readonly status: number;
+  constructor(message: string, status: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'InventoryUnavailableError';
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+async function readInventoryError(res: Response): Promise<InventoryUnavailableError> {
+  const body = await res.json().catch(() => ({})) as { error?: string; retry_after_seconds?: number };
+  return new InventoryUnavailableError(
+    body.error ?? `HTTP ${res.status}`,
+    res.status,
+    typeof body.retry_after_seconds === 'number' ? body.retry_after_seconds : undefined,
+  );
+}
+
 export async function getInventory(appid: number): Promise<InventoryResponse> {
   const res = await fetch(`${BASE}/api/inventory/${appid}`, { credentials: 'include' });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw await readInventoryError(res);
   return res.json();
 }
 
 export async function getPublicInventory(steamid: string, appid: number): Promise<InventoryResponse> {
   const res = await fetch(`${BASE}/api/inventory/user/${steamid}/${appid}`, { credentials: 'include' });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw await readInventoryError(res);
   return res.json();
 }
 

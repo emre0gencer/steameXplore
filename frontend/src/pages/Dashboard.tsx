@@ -734,7 +734,7 @@ function AccountValuePanel({ data, onRecalculate }: { data: AccountValueData; on
           {([
             { label: 'Game Library', value: data.games.total_cents, sub: `${data.games.priced_count}/${data.games.game_count} priced` },
             { label: 'Inventory', value: data.inventory.total_cents, sub: 'CS2 · Dota 2 · TF2 · Rust' },
-            { label: 'Badges', value: data.badges.total_cents, sub: `${data.badges.priced_count} badges valued` },
+            { label: 'Badges', value: data.badges.total_cents, sub: `${data.badges.badge_count} badges · $0.10/100 XP` },
           ] as const).map(({ label, value, sub }) => (
             <div key={label}>
               <div style={{ fontSize: '11px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.6px' }}>{label}</div>
@@ -853,24 +853,23 @@ function AccountValuePanel({ data, onRecalculate }: { data: AccountValueData; on
           <div>
             <div style={{ display: 'flex', gap: '12px', marginBottom: '20px', flexWrap: 'wrap' }}>
               <div style={{ background: C.surface, borderRadius: '3px', padding: '12px 16px', border: `1px solid ${C.border}` }}>
-                <div style={{ fontSize: '11px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.6px' }}>Total Badge Craft Cost</div>
+                <div style={{ fontSize: '11px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.6px' }}>Est. Badge Value</div>
                 <div style={{ fontSize: '28px', fontWeight: 700, color: C.gold, marginTop: '4px' }}>{fmtCents(data.badges.total_cents)}</div>
               </div>
               <div style={{ background: C.surface, borderRadius: '3px', padding: '12px 16px', border: `1px solid ${C.border}` }}>
                 <div style={{ fontSize: '11px', color: C.muted, textTransform: 'uppercase', letterSpacing: '0.6px' }}>Game Badges</div>
                 <div style={{ fontSize: '28px', fontWeight: 700, color: C.accent, marginTop: '4px' }}>{data.badges.badge_count}</div>
-                <div style={{ fontSize: '11px', color: C.muted }}>{data.badges.priced_count} with card price data</div>
+                <div style={{ fontSize: '11px', color: C.muted }}>at $0.10 / 100 XP</div>
               </div>
             </div>
             <div style={{ color: C.muted, fontSize: '12px', lineHeight: 1.6 }}>
-              Craft cost = <span style={{ color: C.text }}>badge level × cards in set × median card price</span>.
-              Represents the trading card cost to craft each badge to its current level.
+              Est. badge value = <span style={{ color: C.text }}>total badge XP × $0.10 / 100 XP</span>.
             </div>
           </div>
         )}
 
         <div style={{ marginTop: '20px', padding: '10px 14px', background: '#0e1923', borderRadius: '3px', fontSize: '11px', color: C.muted, lineHeight: 1.5 }}>
-          * Estimated values. Game prices from SteamSpy (initial list price, not sale price). Inventory from Steam Market / Skinport. Badge value = cost to craft trading card sets.
+          * Estimated values. Game prices from SteamSpy (initial list price, not sale price). Inventory from Steam Market / Skinport. Badge value = total XP × $0.10 / 100 XP.
         </div>
       </div>
     </>

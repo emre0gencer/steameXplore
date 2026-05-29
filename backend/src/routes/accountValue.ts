@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { withCache, peekCache, TTL } from '../services/cache';
 import { steamFetch } from '../services/steamApi';
+import { withHostQueue } from '../services/httpQueue';
 import { fetchFullInventory } from './inventory';
+
+const STEAM_COMMUNITY_HOST = 'steamcommunity.com';
+const STEAM_COMMUNITY_MIN_GAP_MS = 1500;
 
 const router = Router();
 
@@ -48,9 +52,9 @@ async function getSkinportPriceMap(): Promise<Map<string, SkinportItem>> {
   });
 }
 
-// ── Steam Market price per item (rate-limited: 1100ms between uncached fetches) ─
-
-let lastSteamMarketFetch = 0;
+// ── Steam Market price per item ─────────────────────────────────────────────────
+// Throttling is delegated to the shared steamcommunity.com queue, so market lookups
+// and inventory page fetches automatically serialize against each other.
 
 function parseCents(priceStr: string): number {
   return Math.round(parseFloat(priceStr.replace(/[^0-9.]/g, '')) * 100);
@@ -61,18 +65,14 @@ async function fetchSteamMarketPrice(appid: number, market_hash_name: string): P
     `market:${appid}:${encodeURIComponent(market_hash_name)}`,
     TTL.LONG,
     async () => {
-      const now = Date.now();
-      const wait = 1100 - (now - lastSteamMarketFetch);
-      if (lastSteamMarketFetch > 0 && wait > 0) await new Promise(r => setTimeout(r, wait));
-      lastSteamMarketFetch = Date.now();
-
       const url =
         `https://steamcommunity.com/market/priceoverview/` +
         `?appid=${appid}&market_hash_name=${encodeURIComponent(market_hash_name)}&currency=1`;
-      let res = await fetch(url, { headers: BROWSER_HEADERS });
+      const doFetch = () => fetch(url, { headers: BROWSER_HEADERS });
+      let res = await withHostQueue(STEAM_COMMUNITY_HOST, STEAM_COMMUNITY_MIN_GAP_MS, doFetch);
       if (res.status === 429) {
         await new Promise(r => setTimeout(r, 2000));
-        res = await fetch(url, { headers: BROWSER_HEADERS });
+        res = await withHostQueue(STEAM_COMMUNITY_HOST, STEAM_COMMUNITY_MIN_GAP_MS, doFetch);
       }
       if (!res.ok) return null;
       const data = await res.json() as { success: boolean; lowest_price?: string };
@@ -227,74 +227,18 @@ async function computeInventoryValue(steamid: string) {
 }
 
 // ── Sub-computation: Badges ─────────────────────────────────────────────────────
-
-let lastBadgeCardFetch = 0;
+// Valuation: $0.10 per 100 XP (0.1 cents per XP).
 
 async function computeBadgesValue(steamid: string) {
   const data = await steamFetch<{
-    response: { badges?: { badgeid: number; appid?: number; level: number; xp: number }[] };
+    response: { badges?: { xp: number }[]; player_xp?: number };
   }>('/IPlayerService/GetBadges/v1', { steamid });
 
-  const badges = (data.response.badges ?? []).filter(b => b.appid && b.appid > 0 && b.level > 0);
+  const badges = data.response.badges ?? [];
+  const total_xp = data.response.player_xp ?? badges.reduce((s, b) => s + (b.xp ?? 0), 0);
+  const total_cents = Math.round(total_xp * 0.1);
 
-  // Sort unique appids by total badge XP for that game, most valuable sets first.
-  // This ensures throttled runs still price the highest-value badges.
-  const appXp = new Map<number, number>();
-  for (const b of badges) appXp.set(b.appid!, (appXp.get(b.appid!) ?? 0) + (b.xp ?? 0));
-  const uniqueAppIds = [...new Set(badges.map(b => b.appid!))]
-    .sort((a, b) => (appXp.get(b) ?? 0) - (appXp.get(a) ?? 0))
-    .slice(0, 40); // cap at 40 most valuable sets to avoid runaway rate limiting
-
-  const cardData = new Map<number, { card_count: number; median_price: number }>();
-
-  for (const appid of uniqueAppIds) {
-    try {
-      // Throw on failure so withCache never stores a bad result.
-      const result = await withCache<{ card_count: number; median_price: number }>(
-        `badge-cards:${appid}`, TTL.VERY_LONG, async () => {
-          const now = Date.now();
-          const wait = 1100 - (now - lastBadgeCardFetch);
-          if (lastBadgeCardFetch > 0 && wait > 0) await new Promise(r => setTimeout(r, wait));
-          lastBadgeCardFetch = Date.now();
-
-          const url =
-            `https://steamcommunity.com/market/search/render/` +
-            `?appid=753&category_753_item_class[]=tag_item_class_2` +
-            `&category_753_Game[]=tag_Game_${appid}` +
-            `&count=100&sort_column=price&sort_dir=asc&norender=0`;
-          let res = await fetch(url, { headers: BROWSER_HEADERS });
-          if (res.status === 429) {
-            const retryAfter = Number(res.headers.get('Retry-After') ?? 15);
-            await new Promise(r => setTimeout(r, Math.min(retryAfter, 30) * 1000));
-            res = await fetch(url, { headers: BROWSER_HEADERS });
-          }
-          if (!res.ok) throw new Error(`Market ${appid}: HTTP ${res.status}`);
-          const json = await res.json() as {
-            success: boolean; total_count: number;
-            results?: { sell_price: number }[];
-          };
-          if (!json.success || json.total_count === 0 || !json.results?.length)
-            throw new Error(`No cards for ${appid}`);
-          const prices = json.results.map(r => r.sell_price).filter(p => p > 0).sort((a, b) => a - b);
-          if (!prices.length) throw new Error(`No prices for ${appid}`);
-          return { card_count: json.results.length, median_price: prices[Math.floor(prices.length / 2)] };
-        }
-      );
-      cardData.set(appid, result);
-    } catch { /* skip — not cached, will retry next calculation */ }
-  }
-
-  let total_cents = 0;
-  let priced_count = 0;
-  for (const badge of badges) {
-    const cd = cardData.get(badge.appid!);
-    if (cd) {
-      total_cents += badge.level * cd.card_count * cd.median_price;
-      priced_count++;
-    }
-  }
-
-  return { total_cents, badge_count: badges.length, priced_count };
+  return { total_cents, badge_count: badges.length, priced_count: badges.length };
 }
 
 // ── Route ───────────────────────────────────────────────────────────────────────
