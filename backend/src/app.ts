@@ -44,4 +44,16 @@ app.use('/api/search', searchRouter);
 app.use('/api/user', userRouter);
 app.use('/api/account-value', accountValueRouter);
 
+if (process.env.NODE_ENV !== 'production') {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { markHostThrottled, isHostThrottled } = require('./services/httpQueue') as typeof import('./services/httpQueue');
+  app.post('/debug/trip-breaker', (_req, res) => {
+    markHostThrottled('steamcommunity.com', 60_000);
+    res.json({ throttledFor: isHostThrottled('steamcommunity.com') });
+  });
+  app.get('/debug/breaker', (_req, res) => {
+    res.json({ throttledFor: isHostThrottled('steamcommunity.com') });
+  });
+}
+
 export default app;

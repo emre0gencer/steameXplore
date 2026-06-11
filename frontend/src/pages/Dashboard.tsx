@@ -952,8 +952,8 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
     }
   };
 
-  const totalMins = games?.games.reduce((s, g) => s + g.playtime_forever, 0) ?? 0;
-  const playedGames = games?.games.filter(g => g.playtime_forever > 0) ?? [];
+  const totalMins = games?.games?.reduce((s, g) => s + g.playtime_forever, 0) ?? 0;
+  const playedGames = games?.games?.filter(g => g.playtime_forever > 0) ?? [];
   const badgeCount = level?.badges.length ?? 0;
   const xpCurrent = level ? level.player_xp - level.player_xp_needed_current_level : 0;
   const xpNeeded = level ? level.player_xp_needed_to_level_up : 0;
@@ -1147,7 +1147,7 @@ export default function Dashboard({ targetSteamId }: { targetSteamId?: string } 
         {/* Stat row */}
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
           <StatCard
-            value={games ? games.game_count.toLocaleString() : '—'} label="Games Owned"
+            value={games ? (games.game_count ?? games.games?.length ?? 0).toLocaleString() : '—'} label="Games Owned"
             sub={games ? `${playedGames.length.toLocaleString()} played` : undefined}
             ghost={!games}
             onClick={games ? () => setPanel('games') : undefined}
